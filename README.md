@@ -1,6 +1,6 @@
 # tay_il9
 
-scPred-based cell type label transfer for the IL-9 mast cell project.
+scPred-based cell type label transfer for Tay et al. 
 
 ## Prerequisites
 
