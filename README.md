@@ -74,6 +74,33 @@ renv::restore()
 
 This installs the exact same package versions from the lockfile.
 
+**Uninstall and/or Reinstall (delete old renv state if it exists)**
+
+```r
+unlink("renv", recursive = TRUE)
+unlink("renv.lock")
+unlink(".Rprofile")
+```
+
+**Then run**:
+
+```r
+source("config.R")
+setup_environment()
+```
+
+**After setup completes**:
+
+```r
+load_packages()          # for scPred notebooks
+```
+
+**or**
+
+```r
+load_all_packages()      # for exploratory Rmd notebooks
+```
+
 ## Data Setup
 
 Both RMDs expect data files to live **in the same directory as the scripts** (the project root) by default. The path is controlled by the `data_dir` variable at the top of each RMD — change it if your data lives elsewhere.
