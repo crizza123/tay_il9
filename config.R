@@ -80,61 +80,34 @@ setup_environment <- function() {
   if (!file.exists("renv/activate.R")) {
     renv::init(bare = TRUE)
     message("renv initialized with project-local library.")
+    message("NOTE: If the R session restarts, re-run: source('config.R'); setup_environment()")
   } else {
     renv::activate()
     message("renv already initialized \u2014 activated.")
   }
 
-  # Helper: check the renv *project* library specifically.
-  # requireNamespace() also sees the global library, which causes setup to
-  # skip packages that aren't actually in the project library yet.
-  in_project_lib <- function(pkg) {
-    lib <- .libPaths()[1]
-    nzchar(system.file(package = pkg, lib.loc = lib))
-  }
+  # Use renv::install() unconditionally for all packages.  It is idempotent
+  # (skips packages already in the project library) and always installs into
+  # the renv project library.  We avoid requireNamespace() / system.file()
+  # checks because after renv::init() the global library is still visible,
+  # causing those checks to say "OK" for packages that aren't actually in the
+  # project library yet.
 
-  # ---- 1) Install tooling first (BiocManager + remotes) ----
-  for (pkg in c("BiocManager", "remotes", "devtools", "yaml", "rmarkdown")) {
-    if (in_project_lib(pkg)) {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
-    } else {
-      message("Installing ", pkg, " ...")
-      renv::install(pkg)
-    }
-  }
+  # ---- 1) Tooling ----
+  message("\n-- Installing tooling packages --")
+  renv::install(c("BiocManager", "remotes", "devtools", "yaml", "rmarkdown"))
 
   # ---- 2) CRAN packages ----
-  for (pkg in cran_packages) {
-    if (in_project_lib(pkg)) {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
-    } else {
-      message("Installing ", pkg, " from CRAN ...")
-      renv::install(pkg)
-    }
-  }
+  message("\n-- Installing CRAN packages --")
+  renv::install(cran_packages)
 
   # ---- 3) Bioconductor packages ----
-  # Use renv::install("bioc::pkg") so packages land in the project library.
-  for (pkg in bioc_packages) {
-    if (in_project_lib(pkg)) {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
-    } else {
-      message("Installing ", pkg, " from Bioconductor ...")
-      renv::install(paste0("bioc::", pkg))
-    }
-  }
+  message("\n-- Installing Bioconductor packages --")
+  renv::install(paste0("bioc::", bioc_packages))
 
   # ---- 4) GitHub packages ----
-  # Use renv::install("user/repo") so packages land in the project library.
-  for (pkg in names(github_packages)) {
-    repo <- github_packages[[pkg]]
-    if (in_project_lib(pkg)) {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
-    } else {
-      message("Installing ", pkg, " from GitHub (", repo, ") ...")
-      renv::install(repo)
-    }
-  }
+  message("\n-- Installing GitHub packages --")
+  renv::install(unname(github_packages))
 
   # ---- 5) Snapshot ----
   renv::snapshot(prompt = FALSE)
