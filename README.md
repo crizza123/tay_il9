@@ -4,12 +4,26 @@ scPred-based cell type label transfer for Tay et al.
 
 ## Prerequisites
 
-- R >= 4.3
-- Bioconductor (installed automatically by `config.R`)
+- **Git** — [download here](https://git-scm.com/downloads) if not already installed
+- **R >= 4.3**
+- **RStudio** (recommended) or any R environment
 
-## Installation
+## Getting Started
 
-From an R session in the project directory:
+### 1. Install Git and clone the repository
+
+Install Git for your platform from <https://git-scm.com/downloads>, then open a terminal and run:
+
+```bash
+git clone https://github.com/crizza123/tay_il9.git
+cd tay_il9
+```
+
+This creates a `tay_il9/` folder containing all scripts. Open this folder as your RStudio project directory (or `setwd()` to it).
+
+### 2. Install R packages
+
+From an R session **inside the project directory**:
 
 ```r
 source("config.R")
@@ -20,15 +34,30 @@ This installs all CRAN, Bioconductor, and GitHub dependencies at pinned versions
 
 ## Data Setup
 
-Place the following files in the project directory (or update `data_dir` in each RMD):
+Both RMDs expect data files to live **in the same directory as the scripts** (the project root) by default. The path is controlled by the `data_dir` variable at the top of each RMD — change it if your data lives elsewhere.
 
-| File | Used by |
-|------|---------|
-| `MC_LPMC_072424.rds` | Both RMDs (in-house query) |
-| `GSE128003_HTSeq_counts.txt.gz` | `scPred_GSE_reference.Rmd` |
-| `GSE128074_HTSeq_counts.txt.gz` | `scPred_GSE_reference.Rmd` |
-| `GSE106973_HTSeq_counts.txt.gz` | `scPred_GSE_reference.Rmd` |
-| `Mice_Mast_cells.rds` | `scPred_Tauber_reference.Rmd` |
+Your project directory should look like this:
+
+```
+tay_il9/
+├── config.R
+├── scPred_GSE_reference.Rmd
+├── scPred_Tauber_reference.Rmd
+├── MC_LPMC_072424.rds            <-- in-house query (both RMDs)
+├── GSE128003_HTSeq_counts.txt.gz <-- GSE RMD reference
+├── GSE128074_HTSeq_counts.txt.gz <-- GSE RMD reference
+├── GSE106973_HTSeq_counts.txt.gz <-- GSE RMD reference
+├── Mice_Mast_cells.rds           <-- Tauber RMD reference
+└── plots/                        <-- created automatically on first run
+```
+
+If your data files are in a different location, update `data_dir` in each RMD's setup chunk:
+
+```r
+data_dir <- "/path/to/your/data"   # <-- change this line in Module 1
+```
+
+All downstream file paths (`query_path`, `ref_files`, `reference_path`) are built relative to `data_dir`, so this single change is all that's needed.
 
 ## Usage
 
