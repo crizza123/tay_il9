@@ -1,0 +1,18 @@
+# renv — commit lockfile + activate script, ignore the library itself
+renv/library/
+renv/staging/
+renv/cellar/
+renv/sandbox/
+renv/python/
+
+# Data files (too large for git)
+*.rds
+*.txt.gz
+
+# Plot output
+plots/
+
+# R session files
+.Rhistory
+.RData
+.Rproj.user/

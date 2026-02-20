@@ -1,13 +1,16 @@
 # =============================================================================
-# config.R — Package versions and installer for scPred label transfer pipeline
+# config.R — renv-based environment setup for scPred label transfer pipeline
 # =============================================================================
 # Usage:
 #   source("config.R")           # defines functions + package lists
-#   install_packages()           # install all packages at pinned versions
+#   setup_environment()          # initialize renv + install all packages (first time)
 #   load_packages()              # load all libraries into session
+#
+# On subsequent sessions, renv activates automatically via renv/activate.R.
+# Just run: source("config.R"); load_packages()
 # =============================================================================
 
-# ---- CRAN packages ----
+# ---- Package registry ----
 cran_packages <- list(
   remotes        = "2.5.0",
   Seurat         = "5.1.0",
@@ -24,79 +27,100 @@ cran_packages <- list(
   caret          = "6.0-94"
 )
 
-# ---- Bioconductor packages ----
 bioc_packages <- list(
   biomaRt        = "2.60.1",
   org.Mm.eg.db   = "3.19.1",
   AnnotationDbi  = "1.66.0"
 )
 
-# ---- GitHub packages ----
 github_packages <- list(
   scPred = "immunogenomics/scPred"
 )
 
 # =============================================================================
-# install_packages() — install all dependencies at the specified versions
+# setup_environment() — initialize renv and install all dependencies
+# Run this ONCE when setting up the project for the first time.
 # =============================================================================
-install_packages <- function() {
-  # Ensure remotes is available
+setup_environment <- function() {
+  # Install renv if not available
+  if (!requireNamespace("renv", quietly = TRUE)) {
+    install.packages("renv")
+  }
 
+  # Initialize renv project-local library (skips if already initialized)
+  if (!file.exists("renv/activate.R")) {
+    renv::init(bare = TRUE)
+    message("renv initialized with project-local library.")
+  } else {
+    renv::activate()
+    message("renv already initialized — activated.")
+  }
+
+  # Ensure remotes and BiocManager are available in the renv library
   if (!requireNamespace("remotes", quietly = TRUE)) {
-    install.packages("remotes")
+    renv::install("remotes")
   }
-
-  # Ensure BiocManager is available
   if (!requireNamespace("BiocManager", quietly = TRUE)) {
-    install.packages("BiocManager")
+    renv::install("BiocManager")
   }
 
-  # ---- CRAN ----
+  # ---- CRAN packages ----
   for (pkg in names(cran_packages)) {
     ver <- cran_packages[[pkg]]
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      message("Installing ", pkg, " (", ver, ") from CRAN ...")
-      remotes::install_version(pkg, version = ver, repos = "https://cloud.r-project.org", upgrade = "never")
+      message("Installing ", pkg, " (", ver, ") ...")
+      remotes::install_version(pkg, version = ver,
+                               repos = "https://cloud.r-project.org",
+                               upgrade = "never")
     } else {
       installed_ver <- as.character(packageVersion(pkg))
       if (installed_ver != ver) {
-        message(pkg, " version mismatch: installed ", installed_ver, ", expected ", ver, ". Reinstalling ...")
-        remotes::install_version(pkg, version = ver, repos = "https://cloud.r-project.org", upgrade = "never")
+        message(pkg, " version mismatch: installed ", installed_ver,
+                ", expected ", ver, ". Reinstalling ...")
+        remotes::install_version(pkg, version = ver,
+                                 repos = "https://cloud.r-project.org",
+                                 upgrade = "never")
       } else {
-        message(pkg, " (", ver, ") already installed.")
+        message(pkg, " (", ver, ") OK.")
       }
     }
   }
 
-  # ---- Bioconductor ----
+  # ---- Bioconductor packages ----
   for (pkg in names(bioc_packages)) {
-    ver <- bioc_packages[[pkg]]
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      message("Installing ", pkg, " (", ver, ") from Bioconductor ...")
+      message("Installing ", pkg, " from Bioconductor ...")
       BiocManager::install(pkg, update = FALSE, ask = FALSE)
     } else {
-      message(pkg, " already installed (version: ", as.character(packageVersion(pkg)), ").")
+      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
     }
   }
 
-  # ---- GitHub ----
+  # ---- GitHub packages ----
   for (pkg in names(github_packages)) {
     repo <- github_packages[[pkg]]
     if (!requireNamespace(pkg, quietly = TRUE)) {
       message("Installing ", pkg, " from GitHub (", repo, ") ...")
       remotes::install_github(repo, upgrade = "never")
     } else {
-      message(pkg, " already installed (version: ", as.character(packageVersion(pkg)), ").")
+      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
     }
   }
 
-  message("\nAll packages installed.")
+  # Snapshot the current state so others can restore with renv::restore()
+  renv::snapshot(prompt = FALSE)
+  message("\nEnvironment setup complete. Lockfile written to renv.lock.")
 }
 
 # =============================================================================
 # load_packages() — load all required libraries
 # =============================================================================
 load_packages <- function() {
+  # Activate renv if present (no-op if already active)
+  if (file.exists("renv/activate.R")) {
+    source("renv/activate.R")
+  }
+
   suppressPackageStartupMessages({
     library(Seurat)
     library(SeuratObject)

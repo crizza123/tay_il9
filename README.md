@@ -42,16 +42,37 @@ cd tay_il9
 
 This creates a `tay_il9/` folder containing all scripts. Open this folder as your RStudio project directory (or `setwd()` to it).
 
-### 5. Install R packages
+### 5. Set up the R environment
 
-From an R session **inside the project directory**:
+This project uses [renv](https://rstudio.github.io/renv/) to keep packages in a **project-local library** so they don't interfere with your other R projects.
+
+**First-time setup** — from an R session inside the project directory:
 
 ```r
 source("config.R")
-install_packages()
+setup_environment()
 ```
 
-This installs all CRAN, Bioconductor, and GitHub dependencies at pinned versions. Packages already installed at the correct version are skipped.
+This will:
+1. Initialize an `renv` project-local library in `renv/`
+2. Install all CRAN, Bioconductor, and GitHub dependencies at pinned versions
+3. Write a `renv.lock` lockfile that records the exact package versions
+
+**On subsequent sessions**, packages are already installed. Just load them:
+
+```r
+source("config.R")
+load_packages()
+```
+
+**Restoring on another machine** — after cloning, if `renv.lock` is present:
+
+```r
+install.packages("renv")
+renv::restore()
+```
+
+This installs the exact same package versions from the lockfile.
 
 ## Data Setup
 
