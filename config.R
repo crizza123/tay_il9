@@ -85,44 +85,54 @@ setup_environment <- function() {
     message("renv already initialized \u2014 activated.")
   }
 
+  # Helper: check the renv *project* library specifically.
+  # requireNamespace() also sees the global library, which causes setup to
+  # skip packages that aren't actually in the project library yet.
+  in_project_lib <- function(pkg) {
+    lib <- .libPaths()[1]
+    nzchar(system.file(package = pkg, lib.loc = lib))
+  }
+
   # ---- 1) Install tooling first (BiocManager + remotes) ----
   for (pkg in c("BiocManager", "remotes", "devtools", "yaml", "rmarkdown")) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (in_project_lib(pkg)) {
+      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
+    } else {
       message("Installing ", pkg, " ...")
       renv::install(pkg)
-    } else {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
     }
   }
 
   # ---- 2) CRAN packages ----
   for (pkg in cran_packages) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (in_project_lib(pkg)) {
+      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
+    } else {
       message("Installing ", pkg, " from CRAN ...")
       renv::install(pkg)
-    } else {
-      message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
     }
   }
 
   # ---- 3) Bioconductor packages ----
+  # Use renv::install("bioc::pkg") so packages land in the project library.
   for (pkg in bioc_packages) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      message("Installing ", pkg, " from Bioconductor ...")
-      BiocManager::install(pkg, update = FALSE, ask = FALSE)
-    } else {
+    if (in_project_lib(pkg)) {
       message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
+    } else {
+      message("Installing ", pkg, " from Bioconductor ...")
+      renv::install(paste0("bioc::", pkg))
     }
   }
 
   # ---- 4) GitHub packages ----
+  # Use renv::install("user/repo") so packages land in the project library.
   for (pkg in names(github_packages)) {
     repo <- github_packages[[pkg]]
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      message("Installing ", pkg, " from GitHub (", repo, ") ...")
-      remotes::install_github(repo, upgrade = "never")
-    } else {
+    if (in_project_lib(pkg)) {
       message(pkg, " (", as.character(packageVersion(pkg)), ") OK.")
+    } else {
+      message("Installing ", pkg, " from GitHub (", repo, ") ...")
+      renv::install(repo)
     }
   }
 
