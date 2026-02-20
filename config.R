@@ -72,17 +72,23 @@ github_packages <- c(
 # =============================================================================
 setup_environment <- function() {
 
+  # Suppress RStudio session restarts during setup.
+  # renv::init() and renv::activate() default restart = interactive(),
+  # which kills the running function before packages get installed.
+  old_restart <- getOption("restart")
+  on.exit(options(restart = old_restart), add = TRUE)
+  options(restart = NULL)
+
   # ---- 0) Bootstrap renv ----
   if (!requireNamespace("renv", quietly = TRUE)) {
     install.packages("renv")
   }
 
   if (!file.exists("renv/activate.R")) {
-    renv::init(bare = TRUE)
+    renv::init(bare = TRUE, restart = FALSE)
     message("renv initialized with project-local library.")
-    message("NOTE: If the R session restarts, re-run: source('config.R'); setup_environment()")
   } else {
-    renv::activate()
+    renv::activate(restart = FALSE)
     message("renv already initialized \u2014 activated.")
   }
 
