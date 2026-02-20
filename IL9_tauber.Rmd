@@ -1,0 +1,286 @@
+---
+title: "IL9_experiment_2"
+output: html_document
+date: "2025-10-30"
+---
+
+
+```{r}
+library(SeuratObject)
+library(Seurat)
+library(BiocManager)
+library(devtools)
+library(tidyverse)
+library(Seurat)
+library(rsvd)
+library(SeuratWrappers)
+library(SeuratObject)
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+library(clustree)
+library(scCustomize)
+library(clusterProfiler)
+library(GSEAplot)
+library(enrichplot)
+library(ggplot2)
+library(Nebulosa)
+library(svglite)
+library(monocle3)
+library(BioVenn)
+library(tidyquant)
+library(tradeSeq)
+library(slingshot)
+library(openxlsx)
+library(scPred)
+```
+
+```{r setup, include=FALSE}
+
+
+
+query@assays$SCT@data
+
+reference  <- MC_LPMC_072424
+query <- `Mice_Mast_cells (1)` 
+
+
+DimPlot(query, reduction = "umap", group.by = "orig.ident")
+
+query@meta.data$orig.ident
+
+
+query <- SCTransform(query)
+DefaultAssay(query) <- "SCT"
+query <- RunPCA(query)
+
+query@reductions$pca
+reference@reductions$pca
+
+
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = query,
+  normalization.method = "SCT",
+  reference.reduction = "pca",
+  dims = 1:50
+)
+
+
+# 3. Transfer labels
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata   = character_id_vector,
+  dims      = 1:50
+)
+
+query <- AddMetaData(query, predictions)
+
+
+
+table(query$Group)
+
+
+query@assays$
+
+id_vector <- Idents(reference)
+
+character_id_vector <- as.character(id_vector)
+
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+query@assays
+
+query <- `Mice_Mast_cells (1)`
+
+reference <- ""
+
+
+anchors_subset <- FindTransferAnchors(
+  reference = reference,
+  query = query,
+  normalization.method = norm_method,
+  dims = 1:30
+)
+
+pred_subset <- TransferData(
+  anchorset = anchors_subset,
+  refdata   = reference@active.ident,   # <-- change to your ref label column if different
+  dims      = 1:30
+)
+
+query
+
+
+query <- AddMetaData(query, pred_subset)
+
+# --- 4) Quick QC plots on the subset 
+DimPlot(query, reduction = "umap", label = TRUE)
+FeaturePlot(query, "prediction.score.max", reduction = "umap")
+
+# Show transferred labels on the reference UMAP
+DimPlot(query, reduction = "umap", gro.by = "predicted.id", label = TRUE)
+
+#Show Original Protein Marker Labels
+DimPlot(query, reduction = "umap", group.by = "cell_label", label = TRUE)
+
+# Confidence heatmap on UMAP
+FeaturePlot(query, features = "prediction.score.max", reduction = "umap")
+DimPlot(query, reduction = "umap" )
+
+table(query$predicted.id)
+
+```
+
+```{r}
+
+# Prediction Plot By tissue
+Idents(query) <- "orig.ident" 
+VlnPlot(
+  query,
+  features = "prediction.score.max"
+)
+
+## Projection of Max prediction score 
+
+
+FeaturePlot(
+  query,
+  features  = "prediction.score.max",
+  reduction = "umap",
+  min.cutoff = "q05",
+  max.cutoff = "q95"
+)
+
+
+## 
+DimPlot(query, reduction = "umap", split.by = "predicted.id")
+
+
+
+
+FeaturePlot(
+  query,
+  features  = "prediction.score.CTMCs",  # exact column name from meta.data
+  reduction = "umap",                    # or "ref.umap" / other, if applicable
+  cols      = c("lightgrey", "red"),    # low → high
+  pt.size   = 0.5
+)
+
+
+```
+
+```{r}
+# First, check the exact column name:
+grep("CTMC", colnames(query@meta.data), value = TRUE)
+
+# Suppose the result is "prediction.score.CTMC"
+FeaturePlot(
+  object    = query,
+  features  = "prediction.score.Cycling.McP",  # <- string, not query$...
+  reduction = "umap",
+  cols      = c("lightgrey", "red"),
+  pt.size   = 0.5
+)
+
+# Suppose the result is "prediction.score.CTMC"
+FeaturePlot(
+  object    = query,
+  features  = "prediction.score.CD30.McP",  # <- string, not query$...
+  reduction = "umap",
+  cols      = c("lightgrey", "red"),
+  pt.size   = 0.5
+)
+
+
+# Suppose the result is "prediction.score.CTMC"
+FeaturePlot(
+  object    = query,
+  features  = "prediction.score.CTMC",  # <- string, not query$...
+  reduction = "umap",
+  cols      = c("lightgrey", "red"),
+  pt.size   = 0.5
+)
+
+
+
+# Suppose the result is "prediction.score.CTMC"
+FeaturePlot(
+  object    = query,
+  features  = "prediction.score.MMC",  # <- string, not query$...
+  reduction = "umap",
+  cols      = c("lightgrey", "red"),
+  pt.size   = 0.5
+)
+```
+
+```{r}
+
+##Grab Column Names from the Seurat Object Query. Query represents Tauber 2023 paper looking at Tissue specific mast cell transcriptional states. 
+
+# 1) Get all prediction-score columns from meta.data
+score_cols <- grep("^prediction\\.score", colnames(query@meta.data), value = TRUE)
+
+# 2) Inspect their classes
+sapply(query@meta.data[, score_cols, drop = FALSE], class)
+
+
+numeric_score_cols <- score_cols[
+  sapply(query@meta.data[, score_cols, drop = FALSE], is.numeric)
+]
+numeric_score_cols
+
+
+
+par(mfrow = c(3, 3))  # adjust grid layout as needed
+
+for (cn in numeric_score_cols) {
+  x <- query@meta.data[[cn]]   # guaranteed numeric
+
+  hist(
+    x,
+    main = cn,
+    xlab = "Prediction score",
+    xlim = c(0, 1)
+  )
+}
+
+
+png("prediction_scores_hist2.png", width = 2000, height = 1000, res = 200)
+
+n <- length(numeric_score_cols)
+ncol <- 3
+nrow <- ceiling(n / ncol)
+
+par(mfrow = c(nrow, ncol), mar = c(4, 4, 2, 1))
+
+for (cn in numeric_score_cols) {
+  x <- query@meta.data[[cn]]
+  hist(
+    x,
+    main = cn,
+    xlab = "Prediction score",
+    xlim = c(0, 1)
+  )
+}
+
+dev.off()
+
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

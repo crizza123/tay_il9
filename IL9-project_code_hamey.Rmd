@@ -1,0 +1,837 @@
+---
+title: "IL9_project_RSCRIPT"
+output: html_document
+date: "2025-10-24"
+---
+
+```{r setup, include=FALSE}
+library(SeuratObject)
+library(Seurat)
+library(BiocManager)
+library(devtools)
+library(tidyverse)
+library(Seurat)
+library(rsvd)
+library(SeuratWrappers)
+library(SeuratObject)
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+library(clustree)
+library(scCustomize)
+library(clusterProfiler)
+library(GSEAplot)
+library(enrichplot)
+library(ggplot2)
+library(Nebulosa)
+library(svglite)
+library(monocle3)
+library(BioVenn)
+library(tidyquant)
+library(tradeSeq)
+library(slingshot)
+library(openxlsx)
+library(harmony)
+library(scPred)
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# install.packages("data.table"); install.packages("tools")
+# BiocManager::install(c("org.Mm.eg.db","AnnotationDbi"))          # offline mapping (recommended)
+# BiocManager::install("biomaRt")                                   # optional online mapping
+
+library(data.table)
+library(tools)
+
+# ---------- CONFIG ----------
+dir_path   <- "C:/Users/crizza/OneDrive - Michigan Medicine/Documents/GSE262440/Hamey_Dahlin"     # <— set your folder
+pattern    <- "^GSE.*\\.gz$"
+gene_col   <- "ID"
+out_suffix <- "_symbols.txt.gz"
+
+# Choose mapping backend:
+use_orgdb  <- FALSE    # offline via org.Mm.eg.db (recommended once installed)
+use_biomart <- TRUE  # set TRUE if you prefer BiomaRt online
+
+if (use_orgdb) {
+  library(AnnotationDbi)
+  library(org.Mm.eg.db)
+}
+if (use_biomart) {
+  library(biomaRt)
+  mart <- useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl")
+}
+
+# ---------- 1) Collect unique Ensembl IDs from all files ----------
+files <- list.files(dir_path, pattern = pattern, full.names = TRUE)
+stopifnot(length(files) > 0)
+
+read_ids <- function(fp) {
+  dt <- fread(fp, nThread = max(1, parallel::detectCores() - 1))
+  stopifnot(gene_col %in% names(dt))
+  ids <- as.character(dt[[gene_col]])
+  ids <- ids[!grepl("^(ERCC|_)", ids) & !is.na(ids) & ids != ""]
+  sub("\\.\\d+$", "", ids)  # strip version suffix
+}
+ids_all <- unique(unlist(lapply(files, read_ids)))
+
+# ---------- 2) Build ID -> SYMBOL lookup ----------
+sym_lookup <- setNames(rep(NA_character_, length(ids_all)), ids_all)
+
+if (use_orgdb) {
+  # <-- MAPPING HAPPENS HERE (org.Mm.eg.db)
+  mapped <- AnnotationDbi::mapIds(
+    org.Mm.eg.db,
+    keys      = ids_all,
+    column    = "SYMBOL",
+    keytype   = "ENSEMBL",
+    multiVals = "first"
+  )
+  sym_lookup[names(mapped)] <- unname(mapped)
+}
+
+if (use_biomart) {
+  # <-- MAPPING HAPPENS HERE (biomaRt)
+  tb <- getBM(
+    attributes = c("ensembl_gene_id", "mgi_symbol"),
+    filters    = "ensembl_gene_id",
+    values     = ids_all,
+    mart       = mart
+  )
+  idx <- match(ids_all, tb$ensembl_gene_id)
+  sym_lookup[!is.na(idx)] <- tb$mgi_symbol[idx[!is.na(idx)]]
+}
+
+# Fallback: if a symbol is missing/blank, keep the Ensembl ID
+sym_lookup[is.na(sym_lookup) | sym_lookup == ""] <- names(sym_lookup)[is.na(sym_lookup) | sym_lookup == ""]
+
+# ---------- 3) Rewrite each file with symbols and MAX collapse ----------
+rewrite_with_symbols <- function(fp) {
+  dt <- fread(fp, nThread = max(1, parallel::detectCores() - 1))
+  stopifnot(gene_col %in% names(dt))
+  setnames(dt, gene_col, "ID")
+  dt <- dt[!grepl("^(ERCC|_)", ID) & !is.na(ID) & ID != ""]
+
+  # map to symbols (strip version first)
+  ens_core <- sub("\\.\\d+$", "", dt$ID)
+  dt[, ID := sym_lookup[ens_core]]  # <-- APPLY LOOKUP HERE
+
+  # ensure numeric data columns
+  num_cols <- setdiff(names(dt), "ID")
+  for (cc in num_cols) dt[[cc]] <- as.numeric(dt[[cc]])
+
+  # collapse duplicate symbols by per-cell MAX
+  dt2 <- dt[, lapply(.SD, max), by = ID, .SDcols = num_cols]
+
+  out_file <- file.path(dirname(fp), paste0(file_path_sans_ext(basename(fp)), out_suffix))
+  fwrite(dt2, out_file, sep = "\t", quote = FALSE, compress = "gzip")
+  message("Wrote: ", out_file)
+  invisible(out_file)
+}
+
+outs <- lapply(files, rewrite_with_symbols)
+
+# ---------- Quick verification ----------
+# Show a few IDs and their mapped symbols
+cat("Example mappings:\n")
+print(head(data.table(ensembl = names(sym_lookup), symbol = unname(sym_lookup)), 10))
+cat("Example output file:\n", outs[[1]], "\n")
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+library(data.table)
+library(tools)
+
+# 1) Clean whitelist from tb$mgi_symbol (symbols only)
+allow_sym <- unique(trimws(as.character(tb$mgi_symbol)))
+allow_sym <- allow_sym[!is.na(allow_sym) & allow_sym != ""]
+# If you want to guarantee no Ensembl-like strings are whitelisted:
+allow_sym <- allow_sym[!grepl("^ENS", allow_sym, ignore.case = TRUE)]
+
+# 2) Rewriter: map -> keep only rows in tb$mgi_symbol -> collapse by MAX
+rewrite_with_symbols_keep_tb <- function(fp, sym_lookup, gene_col = "ID") {
+  dt <- data.table::fread(fp)
+  stopifnot(gene_col %in% names(dt))
+  setnames(dt, gene_col, "ID")
+
+  # drop ERCC/_ and blanks
+  dt <- dt[!grepl("^(ERCC|_)", ID) & !is.na(ID) & ID != ""]
+
+  # map Ensembl -> symbol (NO fallback to Ensembl here)
+  ens_core <- sub("\\.\\d+$", "", dt$ID)
+  mapped   <- sym_lookup[ens_core]         # may be NA if unmapped
+  dt[, ID := mapped]
+
+  # keep ONLY symbols present in tb$mgi_symbol
+  before <- nrow(dt)
+  dt <- dt[ID %in% allow_sym]
+  message(basename(fp), ": kept ", nrow(dt), " / ", before, " rows after tb$mgi_symbol filter")
+
+  # numeric + collapse by per-cell MAX
+  num_cols <- setdiff(names(dt), "ID")
+  for (cc in num_cols) dt[[cc]] <- as.numeric(dt[[cc]])
+  dt2 <- dt[, lapply(.SD, max), by = ID, .SDcols = num_cols]
+
+  # sanity: ensure no Ensembl IDs remain
+  stopifnot(!any(grepl("^ENS", dt2$ID, ignore.case = TRUE)))
+
+  out_file <- file.path(dirname(fp),
+                        paste0(tools::file_path_sans_ext(basename(fp)), "_symbols_tbonly.txt.gz"))
+  data.table::fwrite(dt2, out_file, sep = "\t", quote = FALSE, compress = "gzip")
+  invisible(out_file)
+}
+
+# files: your GSE*.gz list
+outs <- lapply(files, rewrite_with_symbols_keep_tb, sym_lookup = sym_lookup)
+
+```
+
+```{r}
+
+
+library(data.table)
+library(Matrix)
+library(Seurat)
+
+dir_path <- "C:/Users/crizza/OneDrive - Michigan Medicine/Documents/GSE262440/Hamey_Dahlin"# <- change me
+files <- list.files(dir_path, pattern = "_symbols.*\\.txt\\.gz$", full.names = TRUE)
+stopifnot(length(files) == 3)                     # you said 3 batches
+
+read_to_seurat <- function(fp) {
+  dt <- fread(fp)
+  stopifnot("ID" %in% names(dt))
+  genes <- dt$ID; dt$ID <- NULL
+  m <- as.matrix(dt); storage.mode(m) <- "numeric"
+  M <- Matrix(m, sparse = TRUE)
+  rownames(M) <- genes
+  obj <- CreateSeuratObject(counts = M, assay = "RNA", project = basename(fp))
+  obj$batch <- basename(fp)                       # record batch label
+  obj
+}
+
+objs <- lapply(files, read_to_seurat)
+names(objs) <- basename(files)
+
+# (Optional but often helpful) keep only genes shared across all batches
+common_genes <- Reduce(intersect, lapply(objs, rownames))
+objs <- lapply(objs, function(s) subset(s, features = common_genes))
+
+
+
+```
+
+
+```{r}
+
+library(Seurat)
+library(Matrix)
+
+library(Seurat)
+library(Matrix)
+
+## ---- helpers ----
+get_counts <- function(s, assay="RNA", layer="counts") {
+  a <- s[[assay]]
+  if (inherits(a, "Assay5")) {
+    if (!(layer %in% Layers(a))) stop("Assay '", assay, "' has no layer '", layer, "'. Layers: ", paste(Layers(a), collapse=", "))
+    GetAssayData(s, assay=assay, layer=layer)
+  } else a@counts
+}
+
+ensure_data_layer <- function(s, assay="RNA") {
+  a <- s[[assay]]
+  if (inherits(a, "Assay5")) {
+    if (!("data" %in% Layers(a))) s <- NormalizeData(s, assay=assay, verbose=FALSE)
+    M <- GetAssayData(s, assay=assay, layer="data")
+    if (nrow(M) == 0 || ncol(M) == 0) s <- NormalizeData(s, assay=assay, verbose=FALSE)
+  } else {
+    if (nrow(a@data) == 0) s <- NormalizeData(s, assay=assay, verbose=FALSE)
+  }
+  s
+}
+
+safe_hvg <- function(s, nfeatures=3000) {
+  tryCatch({
+    FindVariableFeatures(s, selection.method="vst", nfeatures=nfeatures,
+                         loess.span=0.3, verbose=FALSE)
+  }, error=function(e){
+    message("HVG(vst) failed: ", conditionMessage(e), " -> using 'dispersion'.")
+    FindVariableFeatures(s, selection.method="dispersion", nfeatures=nfeatures,
+                         mean.cutoff=c(0.0125, Inf), dispersion.cutoff=c(0.5, Inf),
+                         verbose=FALSE)
+  })
+}
+
+## ---- 0) basic QC: drop zero-count cells & ultra-rare genes ----
+objs <- lapply(objs, function(s) {
+  DefaultAssay(s) <- "RNA"
+  M <- get_counts(s)
+  keep_cells <- Matrix::colSums(M) > 0
+  if (!any(keep_cells)) stop("All cells have zero counts in one object.")
+  s <- s[, keep_cells, drop=FALSE]
+  keep_genes <- Matrix::rowSums(M > 0) >= 3
+  if (!any(keep_genes)) stop("No genes expressed in ≥3 cells in one object.")
+  subset(s, features = rownames(M)[keep_genes])
+})
+
+## ---- 1) ensure 'data' layer exists & is non-empty ----
+objs <- lapply(objs, ensure_data_layer)
+
+## ---- 2) HVGs per object ----
+objs <- lapply(objs, safe_hvg, nfeatures=3000)
+
+## ---- 3) pick integration features and enforce strict intersection ----
+features_all  <- SelectIntegrationFeatures(objs, nfeatures=3000)
+# anchor features MUST exist in every object
+features_inter <- Reduce(intersect, lapply(objs, rownames))
+anchor_features <- intersect(features_all, features_inter)
+if (length(anchor_features) < 200) {
+  # fall back to intersect of variable features if needed
+  vfs_inter <- Reduce(intersect, lapply(objs, VariableFeatures))
+  anchor_features <- unique(intersect(vfs_inter, features_inter))
+}
+if (length(anchor_features) < 200)
+  stop("Too few shared features across objects (", length(anchor_features), "). Loosen filters or raise HVGs.")
+
+## ---- 4) Scale & PCA per object on the SAME anchor_features ----
+objs <- lapply(objs, function(s) {
+  f <- intersect(anchor_features, rownames(s))
+  s <- ScaleData(s, features=f, verbose=FALSE)
+  s <- RunPCA(s, features=f, npcs=min(50, length(f)), verbose=FALSE)
+  s
+})
+
+## decide usable PC count across all objects
+npcs_all <- sapply(objs, function(s) ncol(Embeddings(s, "pca")))
+dims_use <- 1:min(30, max(5, min(npcs_all)))  # at least 5 PCs, at most 30
+
+## ---- 5) Anchors + Integrate with RPCA, fallback to CCA ----
+anchors <- tryCatch({
+  FindIntegrationAnchors(object.list=objs,
+                         anchor.features=anchor_features,
+                         reduction="rpca",
+                         dims=dims_use)
+}, error=function(e){
+  message("RPCA anchors failed: ", conditionMessage(e), " -> trying CCA.")
+  FindIntegrationAnchors(object.list=objs,
+                         anchor.features=anchor_features,
+                         reduction="cca",
+                         dims=dims_use)
+})
+
+integrated <- IntegrateData(anchorset=anchors, dims=dims_use)
+
+DefaultAssay(integrated) <- "integrated"
+integrated <- ScaleData(integrated, verbose=FALSE)
+integrated <- RunPCA(integrated, npcs=min(50, length(anchor_features)), verbose=FALSE)
+integrated <- RunUMAP(integrated, dims=dims_use)
+integrated <- FindNeighbors(integrated, dims=dims_use)
+integrated <- FindClusters(integrated, resolution=0.4)
+
+## ---- sanity prints ----
+cat("Layers(RNA):", paste(Layers(integrated[["RNA"]]), collapse=", "), "\n")
+cat("dims_use:", paste(dims_use, collapse=","), "\n")
+
+```
+
+```{r}
+
+
+# Per-object checks
+for (i in seq_along(objs)) {
+  s <- objs[[i]]
+  cat("\nObject", i, ":", ncol(s), "cells,", nrow(s), "genes\n")
+  cat("Layers:", paste(Layers(s[["RNA"]]), collapse=", "), "\n")
+  cat("HVGs:", length(VariableFeatures(s)), "\n")
+  cat("PCA dims:", tryCatch(ncol(Embeddings(s, "pca")), error=function(e) 0), "\n")
+  missing <- setdiff(anchor_features, rownames(s))
+  cat("Missing anchor features:", length(missing), "\n")
+}
+
+# Confirm 'data' layer non-empty everywhere
+for (i in seq_along(objs)) {
+  Mdata <- GetAssayData(objs[[i]], layer="data")
+  cat("Obj", i, "data layer dims:", nrow(Mdata), "x", ncol(Mdata), "\n")
+}
+
+
+# make sure each object’s cell names are uniquely prefixed
+batch_tags <- paste0("batch", seq_along(objs))
+objs <- Map(function(s, tag) RenameCells(s, add.cell.id = tag), objs, batch_tags)
+
+# quick check: any duplicates left?
+any(duplicated(unlist(lapply(objs, colnames))))
+# should be FALSE
+
+
+
+
+# Select features, then force to strict intersection present in ALL objects
+features_sel  <- SelectIntegrationFeatures(objs, nfeatures = 3000)
+features_all  <- Reduce(intersect, lapply(objs, rownames))
+anchor_feats  <- intersect(features_sel, features_all)
+stopifnot(length(anchor_feats) >= 200)
+
+# Scale + PCA per object on exactly anchor_feats
+objs <- lapply(objs, function(s) {
+  s <- ScaleData(s, features = anchor_feats, verbose = FALSE)
+  s <- RunPCA(s, features = anchor_feats, npcs = min(50, length(anchor_feats)), verbose = FALSE)
+  s
+})
+
+# choose dims that exist in all objects
+npcs <- sapply(objs, function(s) ncol(Embeddings(s, "pca")))
+dims_use <- 1:min(30, max(5, min(npcs)))
+
+
+```
+
+```{r}
+
+
+anchors <- tryCatch({
+  FindIntegrationAnchors(
+    object.list     = objs,
+    anchor.features = anchor_feats,
+    reduction       = "rpca",
+    dims            = dims_use,
+    k.filter        = NA,     # avoid filtering all anchors out
+    k.anchor        = 5,      # smaller for small batches
+    k.score         = 20
+  )
+}, error = function(e) {
+  message("RPCA failed: ", conditionMessage(e), " -> trying CCA.")
+  FindIntegrationAnchors(
+    object.list     = objs,
+    anchor.features = anchor_feats,
+    reduction       = "cca",
+    dims            = dims_use,
+    k.filter        = NA,
+    k.anchor        = 5,
+    k.score         = 20
+  )
+})
+
+integrated <- IntegrateData(anchorset = anchors, dims = dims_use)
+
+DefaultAssay(integrated) <- "integrated"
+integrated <- ScaleData(integrated, verbose = FALSE)
+integrated <- RunPCA(integrated, npcs = min(50, length(anchor_feats)), verbose = FALSE)
+integrated <- RunUMAP(integrated, dims = dims_use)
+integrated <- FindNeighbors(integrated, dims = dims_use)
+integrated <- FindClusters(integrated, resolution = 0.4)
+
+
+# 1) Confirm no dup cell names across ALL objects
+any(duplicated(unlist(lapply(objs, colnames))))
+
+# 2) Confirm anchor_feats exist everywhere
+all(sapply(objs, function(s) all(anchor_feats %in% rownames(s))))
+
+# 3) See how many anchors we actually get
+length(anchors@anchors)  # should be > 0
+
+```
+```{r}
+
+
+library(Seurat)
+library(harmony)
+
+# 0) Preconditions (do these once)
+# - merged has RNA normalized, HVGs found, scaled, and PCA computed
+# - merged$batch exists and marks the 3 batches
+stopifnot("pca" %in% Reductions(merged))
+stopifnot("batch" %in% colnames(merged@meta.data))
+
+# 1) Pick safe dims based on available PCs
+npcs_avail <- ncol(Embeddings(merged, "pca"))
+dims_use   <- 1:min(30, npcs_avail)   # must be length >= 2
+stopifnot(length(dims_use) >= 2)
+
+# 2) Run Harmony (note the exact arg names your method requires)
+merged <- RunHarmony(
+  object         = merged,
+  group.by.vars  = "batch",
+  reduction.use  = "pca",
+  dims.use       = dims_use,
+  reduction.save = "harmony",
+  project.dim    = TRUE,
+  # ... optional tuning: theta=2, lambda=1, max.iter.harmony=20, etc.
+)
+
+# 3) Downstream on the Harmony embedding
+merged <- RunUMAP(merged, reduction = "pca", dims = dims_use, reduction.name = "unintegrated_umap" )
+merged <- RunUMAP(merged, reduction = "harmony", dims = dims_use, reduction.name = "integrated_umap")
+
+merged <- FindNeighbors(merged, reduction = "harmony", dims = dims_use)
+merged <- FindNeighbors(merged, reduction = "pca", dims = dims_use)
+merged <- FindClusters(merged, resolution = 0.5, n)
+
+
+
+
+
+# Quick checks
+Reductions(merged)                 # should include "harmony"
+DimPlot(merged)  # batch mixing
+DimPlot(merged, group.by = "batch") 
+
+DimPlot(merged, group.by = "batch", reduction = "unintegrated_umap")
+DimPlot(merged, group.by = "batch", reduction = "integrated_umap")
+
+
+
+```
+
+```{r}
+
+make_cell_labels <- function(cnames) {
+  # Start NA, then fill in order from most specific to generic
+  lab <- rep(NA_character_, length(cnames))
+
+  # Specific matches first
+  lab[grepl("CD34[_-]?Pos[_-]?Basophil", cnames, ignore.case = TRUE)] <- "Basophil (CD34+)"
+  lab[grepl("CD34[_-]?Neg[_-]?Basophil", cnames, ignore.case = TRUE)] <- "Basophil (CD34-)"
+  lab[grepl("Mature[_-]?M(ast)?[_-]?Cell", cnames, ignore.case = TRUE)] <- "Mature Mast Cell"
+
+  # Exact-type tokens (use word boundaries so “GMP123” won’t match)
+  lab[grepl("\\bBMCP\\b", cnames, ignore.case = TRUE)] <- "BMCP"
+  lab[grepl("\\bGMP\\b",  cnames, ignore.case = TRUE)] <- "GMP"
+
+  # If any Basophil slipped through without CD34 status, tag it
+  lab[is.na(lab) & grepl("Basophil", cnames, ignore.case = TRUE)] <- "Basophil (unspecified)"
+
+  # Everything else
+  lab[is.na(lab)] <- "Other"
+
+  # Make it an ordered factor if you like
+  factor(lab, levels = c(
+    "GMP", "BMCP", "Basophil (CD34+)", "Basophil (CD34-)",
+    "Mature Mast Cell", "Basophil (unspecified)", "Other"
+  ))
+}
+
+
+
+seu <- merged 
+
+seu$cell_label <- make_cell_labels(colnames(seu))
+table(seu$cell_label)
+DimPlot(seu, group.by = "cell_label", label = TRUE)
+
+
+```
+
+```{r}
+
+
+reference <- MC_LPMC_072424
+
+reference@assays
+
+
+query@assays
+
+
+a <- query[["RNA"]]            # StdAssay (v5)
+setNames(lapply(Layers(a), function(L) dim(GetAssayData(a, layer = L))),
+         Layers(a))
+
+
+
+```
+
+
+
+```{r}
+
+
+
+
+library(Seurat)
+library(Matrix)
+
+# --- keep a reference to the current cell order & meta ---
+cells_all <- colnames(query)   # Seurat object cells (order we want)
+
+a <- query[["RNA"]]
+cnt_layers <- grep("^counts\\.", Layers(a), value = TRUE)
+
+# 1) Build a dataset-of-origin vector BEFORE we rebuild the assay
+origin <- setNames(rep(NA_character_, length(cells_all)), cells_all)
+for (L in cnt_layers) {
+  cols <- colnames(GetAssayData(a, layer = L))
+  origin[intersect(cols, cells_all)] <- L
+}
+# Save it in metadata (you can rename to "batch" or "sample" later)
+query$dataset <- origin
+
+# 2) Extract counts matrices and intersect genes to align rows
+cnt_mats <- lapply(cnt_layers, function(L) GetAssayData(a, layer = L))
+common_genes <- Reduce(intersect, lapply(cnt_mats, rownames))
+cnt_mats <- lapply(cnt_mats, function(m) m[common_genes, , drop = FALSE])
+
+# 3) Column-bind all counts
+counts_merged <- do.call(Matrix::cBind, cnt_mats)
+
+# 4) Ensure UNIQUE cell names and no collisions
+stopifnot(!any(duplicated(colnames(counts_merged))))
+
+# 5) Reindex columns to match the Seurat object’s cells; add zeros for any missing
+missing <- setdiff(cells_all, colnames(counts_merged))
+if (length(missing) > 0) {
+  add0 <- Matrix(0, nrow = nrow(counts_merged), ncol = length(missing),
+                 dimnames = list(rownames(counts_merged), missing))
+  counts_merged <- Matrix::cBind(counts_merged, add0)
+}
+# Now reorder to exact object order
+counts_merged <- counts_merged[, cells_all, drop = FALSE]
+
+# 6) (Optional) ensure unique gene names
+rownames(counts_merged) <- make.unique(rownames(counts_merged))
+
+# 7) Rebuild a clean v5 assay with ONE counts layer
+query[["RNA"]] <- CreateAssay5Object(counts = counts_merged)
+DefaultAssay(query) <- "RNA"
+DefaultLayer(query[["RNA"]]) <- "counts"
+
+
+
+```
+
+```{r}
+
+
+
+library(Seurat)
+library(Matrix)
+
+a <- query[["RNA"]]
+cnt_layers <- grep("^counts\\.", Layers(a), value = TRUE)
+stopifnot(length(cnt_layers) > 0)
+
+# --- provenance before rebuild ---
+cells_all <- colnames(query)
+origin <- setNames(rep(NA_character_, length(cells_all)), cells_all)
+for (L in cnt_layers) {
+  cols <- colnames(GetAssayData(a, layer = L))
+  origin[intersect(cols, cells_all)] <- L
+}
+query$dataset <- origin
+
+# --- get counts as dgCMatrix ---
+cnt_mats <- lapply(cnt_layers, function(L) {
+  m <- GetAssayData(a, layer = L)
+  if (!inherits(m, "dgCMatrix")) m <- as(m, "dgCMatrix")
+  m
+})
+
+# --- union of genes, keep order stable ---
+all_genes <- unique(unlist(lapply(cnt_mats, rownames)))
+
+# Align each matrix to all_genes (pad missing rows with zeros) – SAFE way
+align_mat <- function(m, genes_all) {
+  idx <- match(genes_all, rownames(m))         # where each gene sits in m (NA if missing)
+  out <- Matrix(0, nrow = length(genes_all), 
+                   ncol = ncol(m), sparse = TRUE,
+                   dimnames = list(genes_all, colnames(m)))
+  keep <- which(!is.na(idx))
+  if (length(keep)) {
+    out[keep, ] <- m[idx[keep], , drop = FALSE]
+  }
+  out
+}
+
+cnt_mats2 <- lapply(cnt_mats, align_mat, genes_all = all_genes)
+
+# Column-bind all parts (cbind works for sparse)
+counts_merged <- do.call(cbind, cnt_mats2)
+
+# Ensure unique cell names
+stopifnot(!any(duplicated(colnames(counts_merged))))
+
+# Add any query cells not present (should be none, but just in case), then reorder
+missing <- setdiff(cells_all, colnames(counts_merged))
+if (length(missing)) {
+  add0 <- Matrix(0, nrow = nrow(counts_merged), ncol = length(missing), sparse = TRUE,
+                 dimnames = list(rownames(counts_merged), missing))
+  counts_merged <- cbind(counts_merged, add0)
+}
+counts_merged <- counts_merged[, cells_all, drop = FALSE]
+
+# Make gene names unique and rebuild assay
+rownames(counts_merged) <- make.unique(rownames(counts_merged))
+query[["RNA"]] <- CreateAssay5Object(counts = counts_merged)
+DefaultAssay(query) <- "RNA"
+DefaultLayer(query[["RNA"]]) <- "counts"
+
+# Proceed: SCT + PCA (choose safe npcs to avoid SVD warnings)
+query <- SCTransform(query, assay = "RNA", verbose = FALSE)
+nf <- nrow(query[["SCT"]]); nc <- ncol(query)
+safe_npcs <- max(10, min(50, nf - 1, nc - 1))
+query <- RunPCA(query, npcs = safe_npcs, irlba = FALSE, verbose = FALSE)
+
+
+```
+
+
+```{r}
+
+
+if (!"SCT" %in% Assays(ref)) {
+  DefaultAssay(ref) <- "RNA"
+  if ("counts" %in% Layers(ref[["RNA"]])) DefaultLayer(ref[["RNA"]]) <- "counts"
+  ref <- SCTransform(ref, verbose = FALSE)
+  ref <- RunPCA(ref, npcs = min(30, safe_npcs), irlba = FALSE, verbose = FALSE)
+}
+
+anchors <- FindTransferAnchors(reference = ref, query = query,
+                               normalization.method = "SCT", dims = 1:min(30, safe_npcs))
+pred <- TransferData(anchorset = anchors, refdata = ref@active.ident, dims = 1:min(30, safe_npcs))
+query <- AddMetaData(query, pred)
+
+
+ref@active.ident
+```
+
+
+
+```{r}
+
+VlnPlot(query, "prediction.score.max")
+
+table(cluster = query$seurat_clusters, ref_label = query$predicted.id)
+
+
+
+# Project query into the reference UMAP layout
+query <- MapQuery(
+  anchorset           = anchors,
+  reference           = ref,
+  query               = query,
+  refdata             = list(celltype = "celltype"),  # column in ref
+  reference.reduction = "pca",
+  reduction.model     = "umap"
+)
+
+# Show transferred labels on the reference UMAP
+DimPlot(query, reduction = "umap", group.by = "predicted.id", label = TRUE)
+
+# Confidence heatmap on UMAP
+FeaturePlot(query, features = "prediction.score.max", reduction = "umap")
+
+
+
+query@meta.data$orig.ident
+```
+
+```{r}
+
+p1 <- DimPlot(query, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+
+```
+
+
+```{r}
+
+library(Seurat)
+
+# --- 0) Don't touch the original object ---
+# (Assume your original object is named `query`)
+query_subset <- subset(query, subset = orig.ident != "GMP" | is.na(orig.ident))
+
+# --- 1) Prep normalization (SCT if available, else LogNormalize) ---
+use_sct <- "SCT" %in% Assays(query) || "counts" %in% Layers(query_subset[["RNA"]])
+
+if (use_sct) {
+  # make sure counts is the default layer if present
+  if ("counts" %in% Layers(query_subset[["RNA"]])) {
+    DefaultLayer(query_subset[["RNA"]]) <- "counts"
+  }
+  DefaultAssay(query_subset) <- "RNA"
+  if (!"SCT" %in% Assays(query_subset)) {
+    query_subset <- SCTransform(query_subset, assay = "RNA", verbose = FALSE)
+  }
+  DefaultAssay(query_subset) <- "SCT"
+} else {
+  DefaultAssay(query_subset) <- "RNA"
+  query_subset <- NormalizeData(query_subset)
+  query_subset <- FindVariableFeatures(query_subset, nfeatures = 3000)
+  query_subset <- ScaleData(query_subset)
+}
+
+# --- 2) Recompute reductions & clustering on the subset ---
+query_subset <- RunPCA(query_subset, npcs = 30, irlba = FALSE, verbose = FALSE)
+query_subset <- FindNeighbors(query_subset, dims = 1:30)
+query_subset <- FindClusters(query_subset, resolution = 0.5)
+query_subset <- RunUMAP(query_subset, dims = 1:30)
+
+# --- 3) Redo label transfer on the subset ---
+norm_method <- if (use_sct && "SCT" %in% Assays(ref)) "SCT" else "LogNormalize"
+
+anchors_subset <- FindTransferAnchors(
+  reference = ref,
+  query = query_subset,
+  normalization.method = norm_method,
+  dims = 1:30
+)
+
+pred_subset <- TransferData(
+  anchorset = anchors_subset,
+  refdata   = ref@active.ident,   # <-- change to your ref label column if different
+  dims      = 1:30
+)
+
+query_subset <- AddMetaData(query_subset, pred_subset)
+
+# --- 4) Quick QC plots on the subset 
+DimPlot(query_subset, reduction = "umap", group.by = "predicted.id", label = TRUE)
+FeaturePlot(query_subset, "prediction.score.max", reduction = "umap")
+# Show transferred labels on the reference UMAP
+DimPlot(query_subset, reduction = "umap", group.by = "predicted.id", label = TRUE)
+#Show Original Protein Marker Labels
+DimPlot(query_subset, reduction = "umap", group.by = "cell_label", label = TRUE)
+# Confidence heatmap on UMAP
+FeaturePlot(query_subset, features = "prediction.score.max", reduction = "umap")
+DimPlot(query_subset, reduction = "umap" )
+
+
+query_subset@meta.data$cell_label
+
+
+# (Optional) gray out low-confidence calls
+cutoff <- 0.8
+query_subset$predicted.id_conf <- ifelse(query_subset$prediction.score.max >= cutoff,
+                                         query_subset$predicted.id, NA)
+DimPlot(query_subset, reduction = "umap", group.by = "predicted.id_conf",
+        label = TRUE, na.value = "grey85")
+
+
+query_subset@meta.data$cell_label
+```
+
+```{r}
+
+
+
+MC <- MC_LPMC_072424
+
+head(MC@reductions[["pca"]])
+
+Embeddings(MC, "pca")
+
+
+```
