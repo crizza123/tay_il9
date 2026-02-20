@@ -30,7 +30,8 @@ cran_packages <- list(
 bioc_packages <- list(
   biomaRt        = "2.60.1",
   org.Mm.eg.db   = "3.19.1",
-  AnnotationDbi  = "1.66.0"
+  AnnotationDbi  = "1.66.0",
+  GEOquery       = "2.72.0"
 )
 
 github_packages <- list(
@@ -137,6 +138,7 @@ load_packages <- function() {
     library(biomaRt)
     library(AnnotationDbi)
     library(org.Mm.eg.db)
+    library(GEOquery)
   })
   message("All packages loaded.")
 }

@@ -55,6 +55,29 @@ save_base_plot <- function(expr, name, width = 10, height = 7, dpi = 300) {
 }
 ```
 
+## Module 1b: Download GSE Reference Data
+
+```{r download-gse-data, message=FALSE}
+# Download HTSeq count files from GEO if not already present
+gse_accessions <- c("GSE128003", "GSE128074", "GSE106973")
+
+for (acc in gse_accessions) {
+  dest <- file.path(data_dir, paste0(acc, "_HTSeq_counts.txt.gz"))
+  if (file.exists(dest)) {
+    message(acc, " already present — skipping download.")
+    next
+  }
+  message("Downloading supplementary files for ", acc, " ...")
+  supp <- getGEOSuppFiles(acc, baseDir = tempdir(),
+                          filter_regex = "HTSeq_counts")
+  downloaded <- rownames(supp)
+  match_file <- downloaded[grep("HTSeq_counts", downloaded)]
+  if (length(match_file) == 0) stop("No HTSeq_counts file found for ", acc)
+  file.copy(match_file[1], dest)
+  message("  -> saved to ", dest)
+}
+```
+
 ## Module 2: Load SMART-seq2 Reference Data
 
 ```{r load-reference-data, message=FALSE}

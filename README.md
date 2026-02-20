@@ -78,18 +78,27 @@ This installs the exact same package versions from the lockfile.
 
 Both RMDs expect data files to live **in the same directory as the scripts** (the project root) by default. The path is controlled by the `data_dir` variable at the top of each RMD — change it if your data lives elsewhere.
 
-Your project directory should look like this:
+**GSE reference files download automatically.** The GSE RMD uses `GEOquery::getGEOSuppFiles()` to fetch the three HTSeq count files from GEO on first run. If the files already exist in `data_dir`, the download is skipped.
+
+You only need to **manually place** these files:
+
+| File | Used by |
+|------|---------|
+| `MC_LPMC_072424.rds` | Both RMDs (in-house query) |
+| `Mice_Mast_cells.rds` | Tauber RMD (reference) |
+
+Your project directory should look like this after the first GSE run:
 
 ```
 tay_il9/
 ├── config.R
 ├── scPred_GSE_reference.Rmd
 ├── scPred_Tauber_reference.Rmd
-├── MC_LPMC_072424.rds            <-- in-house query (both RMDs)
-├── GSE128003_HTSeq_counts.txt.gz <-- GSE RMD reference
-├── GSE128074_HTSeq_counts.txt.gz <-- GSE RMD reference
-├── GSE106973_HTSeq_counts.txt.gz <-- GSE RMD reference
-├── Mice_Mast_cells.rds           <-- Tauber RMD reference
+├── MC_LPMC_072424.rds            <-- manual: in-house query (both RMDs)
+├── GSE128003_HTSeq_counts.txt.gz <-- auto-downloaded from GEO
+├── GSE128074_HTSeq_counts.txt.gz <-- auto-downloaded from GEO
+├── GSE106973_HTSeq_counts.txt.gz <-- auto-downloaded from GEO
+├── Mice_Mast_cells.rds           <-- manual: Tauber RMD reference
 └── plots/                        <-- created automatically on first run
 ```
 
