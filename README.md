@@ -10,9 +10,30 @@ scPred-based cell type label transfer for Tay et al.
 
 ## Getting Started
 
-### 1. Install Git and clone the repository
+### 1. Install Git
 
-Install Git for your platform from <https://git-scm.com/downloads>, then open a terminal and run:
+Download and install Git for your platform from <https://git-scm.com/downloads>.
+
+### 2. Tell RStudio where Git is
+
+Open RStudio and go to **Tools -> Global Options -> Git/SVN**. If the Git executable is not auto-detected, browse to the path — typically:
+
+```
+C:/Program Files/Git/bin/git.exe
+```
+
+Check the box for **"Enable version control interface for RStudio projects"** if it isn't already. Click OK and restart RStudio.
+
+### 3. Configure your identity
+
+Open a terminal (the **Terminal** tab in RStudio works fine) and run:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "your_email@umich.edu"
+```
+
+### 4. Clone the repository
 
 ```bash
 git clone https://github.com/crizza123/tay_il9.git
@@ -21,7 +42,7 @@ cd tay_il9
 
 This creates a `tay_il9/` folder containing all scripts. Open this folder as your RStudio project directory (or `setwd()` to it).
 
-### 2. Install R packages
+### 5. Install R packages
 
 From an R session **inside the project directory**:
 
