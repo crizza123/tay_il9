@@ -135,11 +135,9 @@ query_path     <- file.path(data_dir, "MC_LPMC_072424.rds")
 obj_b <- readRDS(query_path)
 ```
 
-```{r} 
+```{r convert-ensmusg, message=FALSE} 
 
-## Module 3: Convert ENSMUSG to Gene Symbols
 
-```{r convert-ensmusg, message=FALSE}
 # Collect all unique ENSMUSG IDs across files (strip version suffix)
 all_ensmusg <- unique(unlist(lapply(ref_data_list, function(x) {
   sub("\\.\\d+$", "", x$dt$ID)
