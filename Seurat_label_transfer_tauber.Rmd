@@ -22,27 +22,29 @@ knitr::opts_chunk$set(
 )
 ```
 
-## Overview
-
-Transfer labels bidirectionally between two annotated Seurat objects using
-`FindTransferAnchors()` → `TransferData()`. Cells receiving consistent labels
-in both directions are high-confidence annotations; discordant cells flag
-ambiguous identities.
-
-- **obj_A** = reference (direction 1) / query (direction 2)
-- **obj_B** = query (direction 1) / reference (direction 2)
-- **Normalization**: SCTransform
-- **Assumption**: Both objects are pre-processed with PCA already computed
-
 ---
 
 ## Setup
 
 ```{r libraries}
 library(Seurat)
+library(SeuratObject)
+library(BiocManager)
+library(tidyverse)
+library(SeuratWrappers)
 library(dplyr)
 library(ggplot2)
-library(pheatmap)
+library(ggridges)
+library(scCustomize)
+library(svglite)
+library(tidyquant)
+library(openxlsx)
+library(harmony)
+library(scPred)
+library(biomaRt)
+library(GEOquery)
+library(data.table)
+library(Matrix)
 ```
 
 ### Configuration
@@ -50,7 +52,7 @@ library(pheatmap)
 ```{r config}
 
 # ---- User-configurable paths ----
-data_dir       <- "~/tay_il9"
+data_dir       <- "."
 # <-- set to directory containing data files
 query_path     <- file.path(data_dir, "MC_LPMC_072424.rds")
 reference_path <- file.path(data_dir, "Mice_Mast_cells.rds")
@@ -96,7 +98,6 @@ obj_A serves as the reference; obj_B is the query.
 
 ```{r direction-1}
 
-
 DefaultAssay(obj_A) <- "RNA"
 obj_A <- SCTransform(obj_A, verbose = TRUE)
 obj_A <- RunPCA(obj_A, verbose = FALSE)
@@ -127,6 +128,23 @@ obj_B$prediction_score_from_A <- predictions_AB$prediction.score.max
 
 cat("Median prediction score (A → B):", round(median(obj_B$prediction_score_from_A), 3), "\n")
 ```
+```{r}
+
+# Add the full predictions data frame
+obj_B <- AddMetaData(obj_B, predictions_AB)
+
+grep("prediction", colnames(obj_B@meta.data), value = TRUE)
+
+# Add the full predictions data frame
+obj_B <- AddMetaData(obj_B, predictions_AB)
+
+grep("prediction", colnames(obj_B@meta.data), value = TRUE)
+
+score_cols <- grep("^prediction\\.score\\.", colnames(obj_B@meta.data), value = TRUE)
+score_cols <- score_cols[score_cols != "prediction.score.max"]
+
+```
+
 ```{r}
 ##Prepare the data for sunmmary
 
@@ -228,5 +246,135 @@ ggplot(long_scores, aes(x = label, y = score, fill = label)) +
   )
 
 
+```
+
+## Direction 2: obj_B → obj_A
+
+```{r direction-2-transfer}
+anchors_BA <- FindTransferAnchors(
+  reference            = obj_B,
+  query                = obj_A,
+  dims                 = 1:n_dims,
+  k.anchor             = k_anchor,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  verbose              = TRUE
+)
+
+predictions_BA <- TransferData(
+  anchorset        = anchors_BA,
+  refdata          = obj_B$ground_truth,
+  dims             = 1:n_dims,
+  weight.reduction = "pcaproject",
+  k.weight         = k_weight,
+  verbose          = TRUE
+)
+
+obj_A$predicted_from_B        <- predictions_BA$predicted.id
+obj_A$prediction_score_from_B <- predictions_BA$prediction.score.max
+
+cat("Median prediction score (B → A):", round(median(obj_A$prediction_score_from_B), 3), "\n")
+```
+
+```{r direction-2-add-metadata}
+# Remove the manually added columns to avoid conflicts
+obj_A$predicted_from_B <- NULL
+obj_A$prediction_score_from_B <- NULL
+
+# Add the full predictions data frame to metadata
+obj_A <- AddMetaData(obj_A, predictions_BA)
+
+# Check what got added
+grep("prediction", colnames(obj_A@meta.data), value = TRUE)
+
+score_cols_BA <- grep("^prediction\\.score\\.", colnames(obj_A@meta.data), value = TRUE)
+score_cols_BA <- score_cols_BA[score_cols_BA != "prediction.score.max"]
+
+FeaturePlot(
+  obj_A,
+  features  = score_cols_BA,
+  reduction = "umap",
+  order     = TRUE,
+  ncol      = 3
+) & scale_color_viridis_c() & theme_minimal(base_size = 10)
+```
+
+```{r direction-2-top3-scores}
+# Find top 3 labels per cluster by mean score
+top3_labels_BA <- obj_A@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_A))) %>%
+  dplyr::select(cluster, all_of(score_cols_BA)) %>%
+  pivot_longer(cols = all_of(score_cols_BA), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  group_by(cluster, label) %>%
+  summarise(mean_score = mean(score), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(order_by = mean_score, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+# Build long-form data filtered to top 3 per cluster
+long_scores_BA <- obj_A@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_A))) %>%
+  dplyr::select(cluster, all_of(score_cols_BA)) %>%
+  pivot_longer(cols = all_of(score_cols_BA), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  semi_join(top3_labels_BA, by = c("cluster", "label"))
+```
+
+```{r direction-2-barplot}
+## Barplot for the Top 3 predictions (B → A)
+ggplot(long_scores_BA, aes(x = cluster, y = score, fill = label)) +
+  geom_col(
+    data = long_scores_BA %>%
+      group_by(cluster, label) %>%
+      summarise(score = mean(score), .groups = "drop"),
+    position = position_dodge(width = 0.8),
+    width = 0.7, alpha = 0.4
+  ) +
+  geom_jitter(
+    aes(color = label),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.3, alpha = 0.3
+  ) +
+  stat_summary(
+    fun = mean, geom = "crossbar", width = 0.5,
+    position = position_dodge(width = 0.8),
+    linewidth = 0.4, color = "black"
+  ) +
+  labs(
+    title = "Top 3 Mean Prediction Scores per Cluster (B → A)",
+    x     = "Cluster",
+    y     = "Prediction Score",
+    fill  = "Predicted Label",
+    color = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+```
+
+```{r direction-2-violin}
+## Violin Plot for the Top 3 predictions (B → A)
+ggplot(long_scores_BA, aes(x = label, y = score, fill = label)) +
+  geom_violin(alpha = 0.4, linewidth = 0.3, scale = "width") +
+  geom_jitter(size = 0.2, alpha = 0.2, width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 2,
+               fill = "black", color = "black") +
+  facet_wrap(~cluster, scales = "free_x") +
+  labs(
+    title = "Top 3 Prediction Scores per Cluster (B → A)",
+    x     = NULL,
+    y     = "Prediction Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
 ```
 
