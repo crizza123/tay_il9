@@ -16,3 +16,8 @@ plots/
 .Rhistory
 .RData
 .Rproj.user/
+"*.rds" 
+"*.h5ad" 
+"*.h5seurat" 
+"*.qs" 
+"outputs/" 
