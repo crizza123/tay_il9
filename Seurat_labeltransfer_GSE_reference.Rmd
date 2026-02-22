@@ -17,16 +17,12 @@ query dataset (MC_LPMC_072424).
 library(Seurat)
 library(SeuratObject)
 library(BiocManager)
-library(devtools)
 library(tidyverse)
-library(rsvd)
 library(SeuratWrappers)
 library(dplyr)
 library(ggplot2)
 library(ggridges)
-library(clustree)
 library(scCustomize)
-library(Nebulosa)
 library(svglite)
 library(tidyquant)
 library(openxlsx)
@@ -132,6 +128,13 @@ for (nm in names(ref_data_list)) {
   print(table(ref_data_list[[nm]]$cell_labels))
 }
 ```
+##Module 3 - Load il-9 datset
+```{r}
+query_path     <- file.path(data_dir, "MC_LPMC_072424.rds")
+obj_b <- readRDS(query_path)
+```
+
+```{r} 
 
 ## Module 3: Convert ENSMUSG to Gene Symbols
 
@@ -228,62 +231,45 @@ cat("Common genes across all 3 datasets:", length(common_genes), "\n")
 seurat_list <- lapply(seurat_list, function(s) subset(s, features = common_genes))
 
 # Merge into a single reference object
-reference <- merge(seurat_list[[1]], y = seurat_list[-1],
+obj_a <- merge(seurat_list[[1]], y = seurat_list[-1],
                    add.cell.ids = paste0("ref", seq_along(seurat_list)))
 
 # Join layers so counts is a single matrix (Seurat v5)
-reference[["RNA"]] <- JoinLayers(reference[["RNA"]])
+obj_a[["RNA"]] <- JoinLayers(obj_a[["RNA"]])
 
 # QC: remove zero-count cells and ultra-rare genes
-counts_mat <- LayerData(reference, layer = "counts")
+counts_mat <- LayerData(obj_a, layer = "counts")
 keep_cells <- Matrix::colSums(counts_mat) > 0
 keep_genes <- Matrix::rowSums(counts_mat > 0) >= 3
-reference <- reference[keep_genes, keep_cells]
+obj_a <- obj_a[keep_genes, keep_cells]
 
 # Set cell type as Idents
-Idents(reference) <- "cell_type"
-cat("Reference object:", ncol(reference), "cells,", nrow(reference), "genes\n")
+Idents(obj_a) <- "cell_type"
+cat("obj_a object:", ncol(obj_a), "cells,", nrow(obj_a), "genes\n")
 cat("Cell types:\n")
-print(table(Idents(reference)))
+print(table(Idents(obj_a)))
 
 # Verify gene names
 cat("\nFirst 10 gene names:\n")
-print(head(rownames(reference), 10))
+print(head(rownames(obj_a), 10))
 ```
 
-## Module 5: Preprocess Reference for scPred
+## Module 5: Preprocess obj_a for scPred
 
-```{r preprocess-reference, message=FALSE}
-reference <- NormalizeData(reference, verbose = FALSE)
-reference <- FindVariableFeatures(reference, selection.method = "vst",
+```{r preprocess-obj_a, message=FALSE}
+obj_a <- NormalizeData(obj_a, verbose = FALSE)
+obj_a <- FindVariableFeatures(obj_a, selection.method = "vst",
                                   nfeatures = 3000, verbose = FALSE)
-reference <- ScaleData(reference, verbose = FALSE)
-reference <- RunPCA(reference, npcs = min(50, ncol(reference) - 1), verbose = FALSE)
-reference <- RunUMAP(reference, dims = 1:30, verbose = FALSE)
+obj_a <- ScaleData(obj_a, verbose = FALSE)
+obj_a <- RunPCA(obj_a, npcs = min(50, ncol(obj_a) - 1), verbose = FALSE)
+obj_a <- RunUMAP(obj_a, dims = 1:30, verbose = FALSE)
 
-p_ref_umap <- DimPlot(reference, group.by = "cell_type", label = TRUE,
+p_ref_umap <- DimPlot(obj_a, group.by = "cell_type", label = TRUE,
                        repel = TRUE) +
-  ggtitle("Reference UMAP — Cell Types")
+  ggtitle("obj_a UMAP — Cell Types")
 save_and_show(p_ref_umap, "gse_ref_umap_celltypes")
 ```
 
-## Module 6: Train scPred Model
-
-```{r train-scpred, message=FALSE}
-# Get informative feature space
-reference <- getFeatureSpace(reference, "cell_type")
-
-# Train the classifier (default: SVM with radial kernel)
-reference <- trainModel(reference)
-
-# Display model performance summary
-cat("scPred model summary:\n")
-get_scpred(reference)
-
-# Plot training probabilities
-p_train_prob <- plot_probabilities(reference)
-save_and_show(p_train_prob, "gse_scpred_training_probabilities")
-```
 
 ## Module 7: Load Query Data
 
@@ -325,191 +311,7 @@ cat("\nFirst 10 gene names in reference:\n")
 print(head(rownames(reference), 10))
 ```
 
-## Module 8: scPred Classification
 
-```{r scpred-classify, message=FALSE}
-# Run scPred prediction on query with threshold = 0.75
-query <- scPredict(query, reference, threshold = 0.75)
-
-cat("Prediction summary:\n")
-print(table(query$scpred_prediction))
-
-# DimPlot of scPred predictions on query UMAP
-p_pred <- DimPlot(query, group.by = "scpred_prediction", label = TRUE,
-                  repel = TRUE) +
-  ggtitle("scPred Predictions on Query UMAP (threshold ≥ 0.75)")
-save_and_show(p_pred, "gse_scpred_predictions_umap")
-```
-
-## Module 9: Top 3 Consensus Predictions per Query Cluster
-
-```{r top3-predictions, message=FALSE, fig.width=12, fig.height=7}
-# Cross-tabulate clusters vs predictions
-ct <- table(Cluster = query$seurat_clusters, Prediction = query$scpred_prediction)
-ct_df <- as.data.frame(ct)
-
-# For each cluster, get top 3 predictions by frequency
-top3_per_cluster <- ct_df %>%
-  group_by(Cluster) %>%
-  arrange(desc(Freq)) %>%
-  slice_head(n = 3) %>%
-  mutate(Rank = row_number()) %>%
-  ungroup()
-
-cat("Top 3 consensus predictions per query cluster:\n")
-top3_wide <- top3_per_cluster %>%
-  select(Cluster, Rank, Prediction, Freq) %>%
-  arrange(Cluster, Rank)
-print(as.data.frame(top3_wide))
-
-# Barplot: prediction composition per cluster
-p_bar <- ggplot(ct_df %>% filter(Freq > 0),
-                aes(x = Cluster, y = Freq, fill = Prediction)) +
-  geom_bar(stat = "identity", position = "fill") +
-  scale_y_continuous(labels = scales::percent_format()) +
-  labs(title = "scPred Prediction Composition per Query Cluster",
-       x = "Query Cluster", y = "Proportion", fill = "Predicted Label") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-save_and_show(p_bar, "gse_prediction_composition_barplot", width = 12, height = 7)
-
-# Also create a count-based barplot
-p_bar_count <- ggplot(ct_df %>% filter(Freq > 0),
-                      aes(x = Cluster, y = Freq, fill = Prediction)) +
-  geom_bar(stat = "identity", position = "stack") +
-  labs(title = "scPred Prediction Counts per Query Cluster",
-       x = "Query Cluster", y = "Cell Count", fill = "Predicted Label") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-save_and_show(p_bar_count, "gse_prediction_counts_barplot", width = 12, height = 7)
-```
-
-## Module 10: Project Prediction Scores onto Query UMAP
-
-```{r prediction-scores-umap, message=FALSE, fig.width=12, fig.height=10}
-# Get all scpred probability score columns
-score_cols <- grep("^scpred_", colnames(query@meta.data), value = TRUE)
-score_cols <- score_cols[sapply(query@meta.data[, score_cols, drop = FALSE], is.numeric)]
-# Exclude the non-score columns
-score_cols <- score_cols[!score_cols %in% c("scpred_prediction", "scpred_max",
-                                             "scpred_no_prediction")]
-
-cat("Prediction score columns to plot:\n")
-print(score_cols)
-
-# Plot each score on the query UMAP
-for (sc in score_cols) {
-  label_name <- sub("^scpred_", "", sc)
-  p <- FeaturePlot(query, features = sc, reduction = "umap") +
-    scale_colour_gradientn(colours = c("lightgrey", "yellow", "red")) +
-    ggtitle(paste0("Prediction Score: ", label_name))
-  save_and_show(p, paste0("gse_score_umap_", label_name))
-}
-```
-
-## Module 11: Validation Metrics
-
-### scPred Internal Cross-Validation Metrics
-
-```{r scpred-cv-metrics}
-# scPred stores cross-validation results from training
-cat("scPred model cross-validation performance:\n")
-scpred_model <- get_scpred(reference)
-print(scpred_model)
-```
-
-### Confusion Matrix: Query Clusters vs Predictions
-
-```{r confusion-heatmap, fig.width=10, fig.height=8}
-# Build confusion matrix (clusters vs scPred predictions)
-conf_mat <- table(Cluster = query$seurat_clusters,
-                  Prediction = query$scpred_prediction)
-
-# Normalize by row (proportion within each cluster)
-conf_prop <- prop.table(conf_mat, margin = 1)
-
-# Plot as heatmap
-save_base_plot(
-  quote({
-    pheatmap(conf_prop,
-             color = colorRampPalette(c("white", "steelblue", "darkblue"))(100),
-             cluster_rows = TRUE, cluster_cols = TRUE,
-             display_numbers = TRUE, number_format = "%.2f",
-             fontsize_number = 8,
-             main = "Confusion Heatmap: Query Clusters vs scPred Predictions\n(Row-normalized proportions)")
-  }),
-  "gse_confusion_heatmap"
-)
-
-# Also show raw counts version
-save_base_plot(
-  quote({
-    pheatmap(conf_mat,
-             color = colorRampPalette(c("white", "orange", "red"))(100),
-             cluster_rows = TRUE, cluster_cols = TRUE,
-             display_numbers = TRUE, number_format = "%d",
-             fontsize_number = 8,
-             main = "Confusion Heatmap: Query Clusters vs scPred Predictions\n(Raw counts)")
-  }),
-  "gse_confusion_heatmap_counts"
-)
-```
-
-### AuROC Analysis
-
-```{r auroc-analysis, message=FALSE, fig.width=10, fig.height=8}
-# Compute per-class AuROC using scPred probability scores
-# For each predicted class, treat it as binary (class vs rest)
-pred_labels <- query$scpred_prediction
-unique_classes <- sort(unique(pred_labels))
-unique_classes <- unique_classes[unique_classes != "unassigned"]
-
-auroc_results <- data.frame(Class = character(), AuROC = numeric(),
-                            stringsAsFactors = FALSE)
-
-for (cls in unique_classes) {
-  score_col <- paste0("scpred_", cls)
-  if (score_col %in% colnames(query@meta.data)) {
-    scores <- query@meta.data[[score_col]]
-    binary_truth <- ifelse(pred_labels == cls, 1, 0)
-
-    if (length(unique(binary_truth)) == 2) {
-      roc_obj <- roc(binary_truth, scores, quiet = TRUE)
-      auroc_results <- rbind(auroc_results,
-                             data.frame(Class = cls, AuROC = auc(roc_obj)))
-    }
-  }
-}
-
-cat("Per-class AuROC (scPred scores vs. predicted labels):\n")
-print(auroc_results)
-
-# Bar plot of AuROC values
-if (nrow(auroc_results) > 0) {
-  p_auroc <- ggplot(auroc_results, aes(x = reorder(Class, AuROC), y = AuROC)) +
-    geom_col(fill = "steelblue") +
-    geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
-    coord_flip() +
-    ylim(0, 1) +
-    labs(title = "Per-Class AuROC — scPred Predictions",
-         x = "Cell Type", y = "AuROC") +
-    theme_minimal()
-  save_and_show(p_auroc, "gse_auroc_barplot")
-}
-```
-
-### Prediction Confidence Distribution
-
-```{r confidence-distribution, fig.width=10, fig.height=6}
-# Distribution of max prediction scores
-p_conf <- ggplot(query@meta.data, aes(x = scpred_max, fill = scpred_prediction)) +
-  geom_histogram(bins = 50, alpha = 0.7) +
-  geom_vline(xintercept = 0.75, linetype = "dashed", color = "red") +
-  labs(title = "Distribution of Max scPred Prediction Scores",
-       x = "Max Prediction Score", y = "Count", fill = "Predicted Label") +
-  theme_minimal()
-save_and_show(p_conf, "gse_prediction_score_distribution")
-```
 
 ---
 

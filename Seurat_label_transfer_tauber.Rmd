@@ -1,0 +1,232 @@
+---
+title: "Reciprocal Anchor-Based Label Transfer (Seurat / SCT)"
+author: "Christian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 6,
+  fig.align  = "center"
+)
+```
+
+## Overview
+
+Transfer labels bidirectionally between two annotated Seurat objects using
+`FindTransferAnchors()` → `TransferData()`. Cells receiving consistent labels
+in both directions are high-confidence annotations; discordant cells flag
+ambiguous identities.
+
+- **obj_A** = reference (direction 1) / query (direction 2)
+- **obj_B** = query (direction 1) / reference (direction 2)
+- **Normalization**: SCTransform
+- **Assumption**: Both objects are pre-processed with PCA already computed
+
+---
+
+## Setup
+
+```{r libraries}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+```
+
+### Configuration
+
+```{r config}
+
+# ---- User-configurable paths ----
+data_dir       <- "~/tay_il9"
+# <-- set to directory containing data files
+query_path     <- file.path(data_dir, "MC_LPMC_072424.rds")
+reference_path <- file.path(data_dir, "Mice_Mast_cells.rds")
+
+
+# Metadata column containing ground-truth cell type labels
+label_col_A <- "orig.ident"
+label_col_B <- "active.ident"
+
+# Anchor-finding parameters
+n_dims   <- 30
+k_anchor <- 5
+k_weight <- 50
+
+# Output directory
+out_dir <- "reciprocal_transfer_results"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+obj_A <- readRDS(reference_path)
+obj_B <- readRDS(query_path)
+
+
+#Set Idents to Tissue of origin
+Idents(obj_A) <-  "orig.ident"
+
+                   
+```
+
+### Prepare Labels
+
+```{r prepare-labels}
+obj_A$ground_truth <- as.character(obj_A[[label_col_A, drop = TRUE]])
+obj_B$ground_truth <- as.character(obj_B@ active.ident)
+
+cat("obj_A:", ncol(obj_A), "cells,", length(unique(obj_A$ground_truth)), "cell types\n")
+cat("obj_B:", ncol(obj_B), "cells,", length(unique(obj_B$ground_truth)), "cell types\n")
+```
+
+---
+
+## Direction 1: obj_A → obj_B
+
+obj_A serves as the reference; obj_B is the query.
+
+```{r direction-1}
+
+
+DefaultAssay(obj_A) <- "RNA"
+obj_A <- SCTransform(obj_A, verbose = TRUE)
+obj_A <- RunPCA(obj_A, verbose = FALSE)
+
+
+
+anchors_AB <- FindTransferAnchors(
+  reference            = obj_A,
+  query                = obj_B,
+  dims                 = 1:n_dims,
+  k.anchor             = k_anchor,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  verbose              = TRUE
+)
+
+predictions_AB <- TransferData(
+  anchorset        = anchors_AB,
+  refdata          = obj_A$ground_truth,
+  dims             = 1:n_dims,
+  weight.reduction = "pcaproject",
+  k.weight         = k_weight,
+  verbose          = TRUE
+)
+
+obj_B$predicted_from_A        <- predictions_AB$predicted.id
+obj_B$prediction_score_from_A <- predictions_AB$prediction.score.max
+
+cat("Median prediction score (A → B):", round(median(obj_B$prediction_score_from_A), 3), "\n")
+```
+```{r}
+##Prepare the data for sunmmary
+
+top3_labels <- obj_B@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_B))) %>%
+  dplyr::select(cluster, all_of(score_cols)) %>%
+  pivot_longer(cols = all_of(score_cols), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  group_by(cluster, label) %>%
+  summarise(mean_score = mean(score), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(order_by = mean_score, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+long_scores <- obj_B@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_B))) %>%
+  dplyr::select(cluster, all_of(score_cols)) %>%
+  pivot_longer(cols = all_of(score_cols), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  semi_join(top3_labels, by = c("cluster", "label"))
+
+ggplot(long_scores, aes(x = cluster, y = score, fill = label)) +
+  geom_violin(position = position_dodge(width = 0.8), scale = "width", 
+              alpha = 0.7, linewidth = 0.3) +
+  stat_summary(
+    fun = median, geom = "point", shape = 21, size = 1.5, color = "black",
+    position = position_dodge(width = 0.8)
+  ) +
+  labs(
+    title = "Top 3 Prediction Score Distributions per Cluster (A → B)",
+    x     = "Cluster",
+    y     = "Prediction Score",
+    fill  = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+
+# Mean barplot with scCustomize jitter overlay
+library(scCustomize)
+
+# Bar plot with mean scores + individual cells as dots
+ggplot(long_scores, aes(x = cluster, y = score, fill = label)) +
+  geom_col(
+    data = long_scores %>%
+      group_by(cluster, label) %>%
+      summarise(score = mean(score), .groups = "drop"),
+    position = position_dodge(width = 0.8),
+    width = 0.7, alpha = 0.4
+  ) +
+  geom_jitter(
+    aes(color = label),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.3, alpha = 0.3
+  ) +
+  stat_summary(
+    fun = mean, geom = "crossbar", width = 0.5,
+    position = position_dodge(width = 0.8),
+    linewidth = 0.4, color = "black"
+  ) +
+  labs(
+    title = "Top 3 Mean Prediction Scores per Cluster (A → B)",
+    x     = "Cluster",
+    y     = "Prediction Score",
+    fill  = "Predicted Label",
+    color = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+````
+
+```{r}
+
+##Violin Plot for the Top 3 predictions.
+
+ggplot(long_scores, aes(x = label, y = score, fill = label)) +
+  geom_violin(alpha = 0.4, linewidth = 0.3, scale = "width") +
+  geom_jitter(size = 0.2, alpha = 0.2, width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 2, 
+               fill = "black", color = "black") +
+  facet_wrap(~cluster, scales = "free_x") +
+  labs(
+    title = "Top 3 Prediction Scores per Cluster (A → B)",
+    x     = NULL,
+    y     = "Prediction Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+
+
+```
+
