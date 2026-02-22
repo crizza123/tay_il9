@@ -21,3 +21,4 @@ plots/
 "*.h5seurat" 
 "*.qs" 
 "outputs/" 
+"*.RData" 
