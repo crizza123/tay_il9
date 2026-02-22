@@ -1,0 +1,719 @@
+---
+title: "scPred Label Transfer — GSE SMART-seq2 Reference"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+# scPred Classification: GSE SMART-seq2 Reference → In-house Query
+
+This notebook trains a scPred classifier on three aggregated SMART-seq2 datasets
+(GSE128003, GSE128074, GSE106973) and predicts cell type labels on the in-house
+query dataset (MC_LPMC_072424).
+
+## Module 1: Setup & Configuration
+
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(BiocManager)
+library(tidyverse)
+library(SeuratWrappers)
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+library(scCustomize)
+library(svglite)
+library(tidyquant)
+library(openxlsx)
+library(harmony)
+library(scPred)
+library(biomaRt)
+library(GEOquery)
+library(data.table)
+library(Matrix)
+
+# ---- Create output directory ----
+dir.create("plots", showWarnings = FALSE)
+
+# ---- User-configurable paths ----
+data_dir   <- "."                           # <-- set to directory containing data files
+query_path <- file.path(data_dir, "MC_LPMC_072424.rds")
+
+ref_files <- c(
+  file.path(data_dir, "GSE128003_HTSeq_counts.txt.gz"),
+  file.path(data_dir, "GSE128074_HTSeq_counts.txt.gz"),
+  file.path(data_dir, "GSE106973_HTSeq_counts.txt.gz")
+)
+
+# ---- Helper: save plot as .svg + .png and print inline ----
+save_and_show <- function(p, name, width = 10, height = 7, dpi = 300) {
+  ggsave(file.path("plots", paste0(name, ".png")), plot = p,
+         width = width, height = height, dpi = dpi)
+  ggsave(file.path("plots", paste0(name, ".svg")), plot = p,
+         width = width, height = height, device = svglite::svglite)
+  print(p)
+}
+
+# ---- Helper: save base R plots as .svg + .png ----
+save_base_plot <- function(expr, name, width = 10, height = 7, dpi = 300) {
+  png(file.path("plots", paste0(name, ".png")),
+      width = width, height = height, units = "in", res = dpi)
+  eval(expr)
+  dev.off()
+
+  svglite::svglite(file.path("plots", paste0(name, ".svg")),
+                   width = width, height = height)
+  eval(expr)
+  dev.off()
+
+  # Print inline
+  eval(expr)
+}
+```
+
+## Module 1b: Download GSE Reference Data
+
+```{r download-gse-data, message=FALSE}
+# Download HTSeq count files from GEO if not already present
+gse_accessions <- c("GSE128003", "GSE128074", "GSE106973")
+
+for (acc in gse_accessions) {
+  dest <- file.path(data_dir, paste0(acc, "_HTSeq_counts.txt.gz"))
+  if (file.exists(dest)) {
+    message(acc, " already present — skipping download.")
+    next
+  }
+  message("Downloading supplementary files for ", acc, " ...")
+  supp <- getGEOSuppFiles(acc, baseDir = tempdir(),
+                          filter_regex = "HTSeq_counts")
+  downloaded <- rownames(supp)
+  match_file <- downloaded[grep("HTSeq_counts", downloaded)]
+  if (length(match_file) == 0) stop("No HTSeq_counts file found for ", acc)
+  file.copy(match_file[1], dest)
+  message("  -> saved to ", dest)
+}
+```
+
+## Module 2: Load SMART-seq2 Reference Data
+
+```{r load-reference-data, message=FALSE}
+# Read each file and extract cell type labels from column names
+read_smartseq2 <- function(fp) {
+  dt <- fread(fp, nThread = max(1, parallel::detectCores() - 1))
+  stopifnot("ID" %in% names(dt))
+
+  # Remove ERCC spike-ins and blank/underscore-prefixed rows
+  dt <- dt[!grepl("^(ERCC|_)", ID) & !is.na(ID) & ID != ""]
+
+  # Preserve gene IDs separately before removing the column
+  gene_ids <- dt$ID
+
+  # Extract cell names (all columns except ID)
+  cell_names <- setdiff(names(dt), "ID")
+
+  # Extract cell type labels: everything before the trailing _<integer>
+  cell_labels <- sub("_\\d+$", "", cell_names)
+
+  list(dt = dt, gene_ids = gene_ids, cell_names = cell_names,
+       cell_labels = cell_labels, source_file = basename(fp))
+}
+
+ref_data_list <- lapply(ref_files, read_smartseq2)
+names(ref_data_list) <- basename(ref_files)
+
+# Preview cell type labels per file
+for (nm in names(ref_data_list)) {
+  cat("\n", nm, ":\n")
+  print(table(ref_data_list[[nm]]$cell_labels))
+}
+```
+
+ Load il-9 datset
+```{r}
+query_path     <- file.path(data_dir, "MC_LPMC_072424.rds")
+obj_b <- readRDS(query_path)
+```
+
+```{r} 
+
+## Module 3: Convert ENSMUSG to Gene Symbols
+
+```{r convert-ensmusg, message=FALSE}
+# Collect all unique ENSMUSG IDs across files (strip version suffix)
+all_ensmusg <- unique(unlist(lapply(ref_data_list, function(x) {
+  sub("\\.\\d+$", "", x$dt$ID)
+})))
+
+cat("Total unique ENSMUSG IDs:", length(all_ensmusg), "\n")
+
+# Query biomaRt for ENSMUSG → MGI symbol mapping
+mart <- useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl")
+mapping_tbl <- getBM(
+  attributes = c("ensembl_gene_id", "mgi_symbol"),
+  filters    = "ensembl_gene_id",
+  values     = all_ensmusg,
+  mart       = mart
+)
+
+# Build lookup: ENSMUSG → symbol
+sym_lookup <- setNames(rep(NA_character_, length(all_ensmusg)), all_ensmusg)
+idx <- match(all_ensmusg, mapping_tbl$ensembl_gene_id)
+sym_lookup[!is.na(idx)] <- mapping_tbl$mgi_symbol[idx[!is.na(idx)]]
+
+# Fallback: keep ENSMUSG ID if no symbol or empty symbol
+sym_lookup[is.na(sym_lookup) | sym_lookup == ""] <-
+  names(sym_lookup)[is.na(sym_lookup) | sym_lookup == ""]
+
+cat("Mapped to symbol:", sum(!grepl("^ENSMUSG", sym_lookup)), "/", length(sym_lookup), "\n")
+cat("\nExample mappings:\n")
+print(head(data.table(ensembl = names(sym_lookup), symbol = unname(sym_lookup)), 10))
+
+# Apply conversion to each data.table and collapse duplicate symbols by MAX
+convert_to_symbols <- function(rd) {
+  dt <- copy(rd$dt)
+
+  # Map ENSMUSG → symbol
+  ens_core <- sub("\\.\\d+$", "", dt$ID)
+  dt[, ID := sym_lookup[ens_core]]
+
+  # Ensure numeric count columns
+  num_cols <- setdiff(names(dt), "ID")
+  for (cc in num_cols) dt[[cc]] <- as.numeric(dt[[cc]])
+
+  # Collapse duplicate gene symbols by per-cell MAX
+  dt <- dt[, lapply(.SD, max), by = ID, .SDcols = num_cols]
+
+  # Update gene_ids to reflect new symbols
+  rd$dt <- dt
+  rd$gene_ids <- dt$ID
+  rd
+}
+
+ref_data_list <- lapply(ref_data_list, convert_to_symbols)
+
+cat("\nGenes after symbol conversion (per file):\n")
+for (nm in names(ref_data_list)) {
+  cat("  ", nm, ":", nrow(ref_data_list[[nm]]$dt), "genes\n")
+}
+```
+
+## Module 4: Combine into Seurat Reference Object
+
+```{r create-reference-seurat, message=FALSE}
+# Build individual Seurat objects with cell type metadata
+build_seurat <- function(rd) {
+  dt <- copy(rd$dt)
+
+  # Use stored gene_ids; drop ID column only if it exists
+  genes <- rd$gene_ids
+  if ("ID" %in% names(dt)) dt[, ID := NULL]
+
+  mat <- as.matrix(dt)
+  rownames(mat) <- genes
+  mat <- as(mat, "sparseMatrix")
+  colnames(mat) <- rd$cell_names
+
+  # Verify gene names are properly assigned
+  stopifnot(!any(grepl("^Feature\\d+$", rownames(mat))))
+
+  obj <- CreateSeuratObject(counts = mat, assay = "RNA",
+                            project = rd$source_file)
+  obj$cell_type <- rd$cell_labels
+  obj$source_file <- rd$source_file
+  obj
+}
+
+seurat_list <- lapply(ref_data_list, build_seurat)
+
+# Find common genes across all datasets
+common_genes <- Reduce(intersect, lapply(seurat_list, rownames))
+cat("Common genes across all 3 datasets:", length(common_genes), "\n")
+seurat_list <- lapply(seurat_list, function(s) subset(s, features = common_genes))
+
+# Merge into a single reference object
+obj_a <- merge(seurat_list[[1]], y = seurat_list[-1],
+                   add.cell.ids = paste0("ref", seq_along(seurat_list)))
+
+# Join layers so counts is a single matrix (Seurat v5)
+obj_a[["RNA"]] <- JoinLayers(obj_a[["RNA"]])
+
+# QC: remove zero-count cells and ultra-rare genes
+counts_mat <- LayerData(obj_a, layer = "counts")
+keep_cells <- Matrix::colSums(counts_mat) > 0
+keep_genes <- Matrix::rowSums(counts_mat > 0) >= 3
+obj_a <- obj_a[keep_genes, keep_cells]
+
+# Set cell type as Idents
+Idents(obj_a) <- "cell_type"
+cat("obj_a object:", ncol(obj_a), "cells,", nrow(obj_a), "genes\n")
+cat("Cell types:\n")
+print(table(Idents(obj_a)))
+
+# Verify gene names
+cat("\nFirst 10 gene names:\n")
+print(head(rownames(obj_a), 10))
+```
+
+## Module 5: Preprocess obj_a for scPred
+
+```{r preprocess-obj_a, message=FALSE}
+obj_a <- NormalizeData(obj_a, verbose = FALSE)
+obj_a <- FindVariableFeatures(obj_a, selection.method = "vst",
+                                  nfeatures = 3000, verbose = FALSE)
+obj_a <- ScaleData(obj_a, verbose = FALSE)
+obj_a <- RunPCA(obj_a, npcs = min(50, ncol(obj_a) - 1), verbose = FALSE)
+obj_a <- RunUMAP(obj_a, dims = 1:30, verbose = FALSE)
+
+p_ref_umap <- DimPlot(obj_a, group.by = "cell_type", label = TRUE,
+                       repel = TRUE) +
+  ggtitle("obj_a UMAP — Cell Types")
+save_and_show(p_ref_umap, "gse_ref_umap_celltypes")
+```
+
+
+## Module 6: Reciprocal Label Transfer (Seurat Anchors)
+### Configuration
+
+```{r transfer-config}
+# Label columns
+ref_label_col   <- "cell_type"        # obj_a annotations
+query_cluster_col <- "seurat_clusters" # obj_b clusters (or use active.ident)
+
+# Anchor parameters
+n_dims   <- 30
+k_anchor <- 5
+k_weight <- 50
+```
+
+### Direction 1: obj_a → obj_b
+
+Transfer known cell-type labels from the GSE SMART-seq2 reference onto the
+in-house query.
+
+```{r direction-1-prep}
+# Prepare ground truth labels
+obj_a$ground_truth <- as.character(obj_a[[ref_label_col, drop = TRUE]])
+obj_b$ground_truth <- as.character(Idents(obj_b))
+
+cat("obj_a:", ncol(obj_a), "cells,", length(unique(obj_a$ground_truth)), "cell types\n")
+cat("obj_b:", ncol(obj_b), "cells,", length(unique(obj_b$ground_truth)), "clusters\n")
+```
+
+```{r direction-1-sct}
+# SCTransform + PCA on reference
+DefaultAssay(obj_a) <- "RNA"
+obj_a <- SCTransform(obj_a, verbose = TRUE)
+obj_a <- RunPCA(obj_a, verbose = FALSE)
+```
+
+```{r direction-1-transfer}
+anchors_AB <- FindTransferAnchors(
+  reference            = obj_a,
+  query                = obj_b,
+  dims                 = 1:n_dims,
+  k.anchor             = k_anchor,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  verbose              = TRUE
+)
+
+predictions_AB <- TransferData(
+  anchorset        = anchors_AB,
+  refdata          = obj_a$ground_truth,
+  dims             = 1:n_dims,
+  weight.reduction = "pcaproject",
+  k.weight         = k_weight,
+  verbose          = TRUE
+)
+
+obj_b$predicted_from_A        <- predictions_AB$predicted.id
+obj_b$prediction_score_from_A <- predictions_AB$prediction.score.max
+
+cat("Median prediction score (A → B):", round(median(obj_b$prediction_score_from_A), 3), "\n")
+```
+
+```{r direction-1-add-metadata}
+# Remove manually added columns to avoid conflicts
+obj_b$predicted_from_A <- NULL
+obj_b$prediction_score_from_A <- NULL
+
+# Add the full predictions data frame
+obj_b <- AddMetaData(obj_b, predictions_AB)
+
+grep("prediction", colnames(obj_b@meta.data), value = TRUE)
+```
+
+### QC Plots: A → B
+
+```{r qc-AB-predicted, fig.width=10, fig.height=7}
+p <- DimPlot(obj_b, reduction = "umap", group.by = "predicted.id", label = TRUE, repel = TRUE) +
+  ggtitle("obj_b: Predicted Labels (from GSE Reference)") +
+  theme_minimal()
+save_and_show(p, "AB_predicted_labels_umap")
+```
+
+```{r qc-AB-clusters, fig.width=10, fig.height=7}
+p <- DimPlot(obj_b, reduction = "umap", label = TRUE, repel = TRUE) +
+  ggtitle("obj_b: Original Clusters") +
+  theme_minimal()
+save_and_show(p, "AB_original_clusters_umap")
+```
+
+```{r qc-AB-scores, fig.width=10, fig.height=7}
+p <- FeaturePlot(obj_b, features = "prediction.score.max", reduction = "umap") +
+  scale_color_viridis_c() +
+  ggtitle("obj_b: Prediction Confidence (A → B)") +
+  theme_minimal()
+save_and_show(p, "AB_prediction_confidence_umap")
+```
+
+```{r qc-AB-violin-scores, fig.width=10, fig.height=7}
+p <- VlnPlot(obj_b, features = "prediction.score.max", pt.size = 0.1) +
+  ggtitle("obj_b: Prediction Confidence per Cluster (A → B)")
+save_and_show(p, "AB_prediction_confidence_violin")
+```
+
+### Per-Label Prediction Score UMAPs (A → B)
+
+```{r AB-per-label-umaps, fig.width=14, fig.height=10}
+score_cols <- grep("^prediction\\.score\\.", colnames(obj_b@meta.data), value = TRUE)
+score_cols <- score_cols[score_cols != "prediction.score.max"]
+
+p <- FeaturePlot(
+  obj_b,
+  features  = score_cols,
+  reduction = "umap",
+  order     = TRUE,
+  ncol      = 3
+) & scale_color_viridis_c() & theme_minimal(base_size = 10)
+
+save_and_show(p, "AB_per_label_score_umaps", width = 14, height = 10)
+```
+
+### Top 3 Predicted Labels per Cluster (A → B)
+
+```{r AB-top3-prep}
+top3_labels <- obj_b@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_b))) %>%
+  dplyr::select(cluster, all_of(score_cols)) %>%
+  pivot_longer(cols = all_of(score_cols), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  group_by(cluster, label) %>%
+  summarise(mean_score = mean(score), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(order_by = mean_score, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+long_scores <- obj_b@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_b))) %>%
+  dplyr::select(cluster, all_of(score_cols)) %>%
+  pivot_longer(cols = all_of(score_cols), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  semi_join(top3_labels, by = c("cluster", "label"))
+```
+
+```{r AB-violin-top3, fig.width=12, fig.height=7}
+p <- ggplot(long_scores, aes(x = cluster, y = score, fill = label)) +
+  geom_violin(position = position_dodge(width = 0.8), scale = "width",
+              alpha = 0.7, linewidth = 0.3) +
+  stat_summary(
+    fun = median, geom = "point", shape = 21, size = 1.5, color = "black",
+    position = position_dodge(width = 0.8)
+  ) +
+  labs(
+    title = "Top 3 Prediction Score Distributions per Cluster (A → B)",
+    x     = "Cluster",
+    y     = "Prediction Score",
+    fill  = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+save_and_show(p, "AB_top3_violin")
+```
+
+```{r AB-barplot-top3, fig.width=12, fig.height=7}
+p <- ggplot(long_scores, aes(x = cluster, y = score, fill = label)) +
+  geom_col(
+    data = long_scores %>%
+      group_by(cluster, label) %>%
+      summarise(score = mean(score), .groups = "drop"),
+    position = position_dodge(width = 0.8),
+    width = 0.7, alpha = 0.4
+  ) +
+  geom_jitter(
+    aes(color = label),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.3, alpha = 0.3
+  ) +
+  stat_summary(
+    fun = mean, geom = "crossbar", width = 0.5,
+    position = position_dodge(width = 0.8),
+    linewidth = 0.4, color = "black"
+  ) +
+  labs(
+    title = "Top 3 Mean Prediction Scores per Cluster (A → B)",
+    x     = "Cluster",
+    y     = "Prediction Score",
+    fill  = "Predicted Label",
+    color = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+save_and_show(p, "AB_top3_barplot")
+```
+
+```{r AB-faceted-violin, fig.width=14, fig.height=10}
+p <- ggplot(long_scores, aes(x = label, y = score, fill = label)) +
+  geom_violin(alpha = 0.4, linewidth = 0.3, scale = "width") +
+  geom_jitter(size = 0.2, alpha = 0.2, width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 2,
+               fill = "black", color = "black") +
+  facet_wrap(~cluster, scales = "free_x") +
+  labs(
+    title = "Top 3 Prediction Scores per Cluster (A → B)",
+    x     = NULL,
+    y     = "Prediction Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+save_and_show(p, "AB_top3_faceted_violin", width = 14, height = 10)
+```
+
+---
+
+### Direction 2: obj_b → obj_a
+
+Transfer obj_b cluster identities back onto the GSE reference.
+
+```{r direction-2-sct}
+DefaultAssay(obj_b) <- "RNA"
+obj_b <- SCTransform(obj_b, verbose = TRUE)
+obj_b <- RunPCA(obj_b, verbose = FALSE)
+```
+
+```{r direction-2-transfer}
+anchors_BA <- FindTransferAnchors(
+  reference            = obj_b,
+  query                = obj_a,
+  dims                 = 1:n_dims,
+  k.anchor             = k_anchor,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  verbose              = TRUE
+)
+
+predictions_BA <- TransferData(
+  anchorset        = anchors_BA,
+  refdata          = obj_b$ground_truth,
+  dims             = 1:n_dims,
+  weight.reduction = "pcaproject",
+  k.weight         = k_weight,
+  verbose          = TRUE
+)
+
+obj_a$predicted_from_B        <- predictions_BA$predicted.id
+obj_a$prediction_score_from_B <- predictions_BA$prediction.score.max
+
+cat("Median prediction score (B → A):", round(median(obj_a$prediction_score_from_B), 3), "\n")
+```
+
+```{r direction-2-add-metadata}
+obj_a$predicted_from_B <- NULL
+obj_a$prediction_score_from_B <- NULL
+
+obj_a <- AddMetaData(obj_a, predictions_BA)
+
+grep("prediction", colnames(obj_a@meta.data), value = TRUE)
+```
+
+### QC Plots: B → A
+
+```{r qc-BA-predicted, fig.width=10, fig.height=7}
+p <- DimPlot(obj_a, reduction = "umap", group.by = "predicted.id", label = TRUE, repel = TRUE) +
+  ggtitle("obj_a: Predicted Cluster (from In-House Query)") +
+  theme_minimal()
+save_and_show(p, "BA_predicted_labels_umap")
+```
+
+```{r qc-BA-original, fig.width=10, fig.height=7}
+p <- DimPlot(obj_a, reduction = "umap", group.by = ref_label_col, label = TRUE, repel = TRUE) +
+  ggtitle("obj_a: Original Reference Labels") +
+  theme_minimal()
+save_and_show(p, "BA_original_labels_umap")
+```
+
+```{r qc-BA-scores, fig.width=10, fig.height=7}
+p <- FeaturePlot(obj_a, features = "prediction.score.max", reduction = "umap") +
+  scale_color_viridis_c() +
+  ggtitle("obj_a: Prediction Confidence (B → A)") +
+  theme_minimal()
+save_and_show(p, "BA_prediction_confidence_umap")
+```
+
+```{r qc-BA-violin-scores, fig.width=10, fig.height=7}
+Idents(obj_a) <- ref_label_col
+p <- VlnPlot(obj_a, features = "prediction.score.max", pt.size = 0.1) +
+  ggtitle("obj_a: Prediction Confidence per Cell Type (B → A)")
+save_and_show(p, "BA_prediction_confidence_violin")
+```
+
+### Per-Label Prediction Score UMAPs (B → A)
+
+```{r BA-per-label-umaps, fig.width=14, fig.height=10}
+score_cols_BA <- grep("^prediction\\.score\\.", colnames(obj_a@meta.data), value = TRUE)
+score_cols_BA <- score_cols_BA[score_cols_BA != "prediction.score.max"]
+
+p <- FeaturePlot(
+  obj_a,
+  features  = score_cols_BA,
+  reduction = "umap",
+  order     = TRUE,
+  ncol      = 3
+) & scale_color_viridis_c() & theme_minimal(base_size = 10)
+
+save_and_show(p, "BA_per_label_score_umaps", width = 14, height = 10)
+```
+
+### Top 3 Predicted Clusters per Cell Type (B → A)
+
+```{r BA-top3-prep}
+top3_labels_BA <- obj_a@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_a))) %>%
+  dplyr::select(cluster, all_of(score_cols_BA)) %>%
+  pivot_longer(cols = all_of(score_cols_BA), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  group_by(cluster, label) %>%
+  summarise(mean_score = mean(score), .groups = "drop") %>%
+  group_by(cluster) %>%
+  slice_max(order_by = mean_score, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+long_scores_BA <- obj_a@meta.data %>%
+  mutate(cluster = as.character(Idents(obj_a))) %>%
+  dplyr::select(cluster, all_of(score_cols_BA)) %>%
+  pivot_longer(cols = all_of(score_cols_BA), names_to = "label", values_to = "score") %>%
+  mutate(label = gsub("prediction\\.score\\.", "", label)) %>%
+  semi_join(top3_labels_BA, by = c("cluster", "label"))
+```
+
+```{r BA-violin-top3, fig.width=12, fig.height=7}
+p <- ggplot(long_scores_BA, aes(x = cluster, y = score, fill = label)) +
+  geom_violin(position = position_dodge(width = 0.8), scale = "width",
+              alpha = 0.7, linewidth = 0.3) +
+  stat_summary(
+    fun = median, geom = "point", shape = 21, size = 1.5, color = "black",
+    position = position_dodge(width = 0.8)
+  ) +
+  labs(
+    title = "Top 3 Prediction Score Distributions per Cell Type (B → A)",
+    x     = "Cell Type",
+    y     = "Prediction Score",
+    fill  = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+save_and_show(p, "BA_top3_violin")
+```
+
+```{r BA-barplot-top3, fig.width=12, fig.height=7}
+p <- ggplot(long_scores_BA, aes(x = cluster, y = score, fill = label)) +
+  geom_col(
+    data = long_scores_BA %>%
+      group_by(cluster, label) %>%
+      summarise(score = mean(score), .groups = "drop"),
+    position = position_dodge(width = 0.8),
+    width = 0.7, alpha = 0.4
+  ) +
+  geom_jitter(
+    aes(color = label),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.3, alpha = 0.3
+  ) +
+  stat_summary(
+    fun = mean, geom = "crossbar", width = 0.5,
+    position = position_dodge(width = 0.8),
+    linewidth = 0.4, color = "black"
+  ) +
+  labs(
+    title = "Top 3 Mean Prediction Scores per Cell Type (B → A)",
+    x     = "Cell Type",
+    y     = "Prediction Score",
+    fill  = "Predicted Label",
+    color = "Predicted Label"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+save_and_show(p, "BA_top3_barplot")
+```
+
+```{r BA-faceted-violin, fig.width=14, fig.height=10}
+p <- ggplot(long_scores_BA, aes(x = label, y = score, fill = label)) +
+  geom_violin(alpha = 0.4, linewidth = 0.3, scale = "width") +
+  geom_jitter(size = 0.2, alpha = 0.2, width = 0.2) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 2,
+               fill = "black", color = "black") +
+  facet_wrap(~cluster, scales = "free_x") +
+  labs(
+    title = "Top 3 Prediction Scores per Cell Type (B → A)",
+    x     = NULL,
+    y     = "Prediction Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+save_and_show(p, "BA_top3_faceted_violin", width = 14, height = 10)
+```
+
+---
+
+## Module 7: Save Results
+
+```{r save-results}
+out_dir <- "reciprocal_transfer_results_GSE"
+dir.create(out_dir, showWarnings = FALSE)
+
+saveRDS(obj_a, file.path(out_dir, "obj_a_annotated.rds"))
+saveRDS(obj_b, file.path(out_dir, "obj_b_annotated.rds"))
+
+write.csv(top3_labels, file.path(out_dir, "top3_predictions_per_cluster_AB.csv"), row.names = FALSE)
+write.csv(top3_labels_BA, file.path(out_dir, "top3_predictions_per_celltype_BA.csv"), row.names = FALSE)
+
+cat("All outputs saved to:", out_dir, "\n")
+```
+
+
+---
+
+**Session Info**
+
+```{r session-info}
+sessionInfo()
+```
